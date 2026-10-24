@@ -32,6 +32,7 @@ import org.sonatype.nexus.repository.cache.CacheInfo;
 import org.sonatype.nexus.repository.content.facet.ContentProxyFacetSupport;
 import org.sonatype.nexus.repository.http.HttpMethods;
 import org.sonatype.nexus.repository.httpclient.HttpClientFacet;
+import org.sonatype.nexus.repository.httpclient.RemoteBlockedIOException;
 import org.sonatype.nexus.repository.proxy.BypassHttpErrorException;
 import org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo;
 import org.sonatype.nexus.repository.huggingface.HuggingFaceErrors;
@@ -46,10 +47,10 @@ import org.sonatype.nexus.repository.view.payloads.StreamPayload;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ArrayListMultimap;
+import com.google.common.collect.ListMultimap;
 import com.google.common.net.HttpHeaders;
 import org.apache.http.Header;
 import org.apache.http.HttpResponse;
@@ -61,6 +62,10 @@ import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpHead;
 import org.apache.http.client.methods.HttpRequestBase;
 import org.apache.http.client.utils.HttpClientUtils;
+import org.sonatype.nexus.validation.ssrf.AntiSsrfService;
+
+import jakarta.validation.ValidationException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.config.ConfigurableBeanFactory;
 import org.springframework.context.annotation.Scope;
 import org.springframework.stereotype.Component;
@@ -89,7 +94,10 @@ public class HuggingFaceProxyFacet
 {
   private static final int MAX_HUB_REDIRECTS = 5;
 
-  private static final int MAX_API_PAGES = 200;
+  /**
+   * Content attribute: path and query of the next page of a listing, relative to the repository.
+   */
+  static final String NEXT_PAGE = "huggingface.nextPage";
 
   private static final String XET_HASH_FIELD = "xetHash";
 
@@ -99,11 +107,15 @@ public class HuggingFaceProxyFacet
 
   private static final String REPO_NOT_FOUND = "RepoNotFound";
 
+  private static final int TOO_MANY_REQUESTS = 429;
+
   private static final String META_PREFIX = "/.meta";
 
   private static final String META_SUFFIX = ".json";
 
   private final ObjectMapper objectMapper = new ObjectMapper();
+
+  private AntiSsrfService antiSsrfService;
 
   /**
    * Downloads in progress, by asset path.
@@ -294,6 +306,7 @@ public class HuggingFaceProxyFacet
   {
     HttpClient client = facet(HttpClientFacet.class).getHttpClient();
     URI uri = getRemoteUrl().resolve(getUrl(context));
+    validateRemoteHost(uri);
     HttpGet request = new HttpGet(uri);
     HttpResponse response = execute(context, client, request);
     int status = response.getStatusLine().getStatusCode();
@@ -360,6 +373,29 @@ public class HuggingFaceProxyFacet
     }
   }
 
+  @Autowired
+  @Override
+  protected void configureAntiSsrfService(final AntiSsrfService antiSsrfService) {
+    super.configureAntiSsrfService(antiSsrfService);
+    this.antiSsrfService = antiSsrfService;
+  }
+
+  /**
+   * The SSRF protection that the regular proxy path applies, for the requests this facet makes directly. (Redirect
+   * targets are checked by the HTTP client.)
+   */
+  private void validateRemoteHost(final URI uri) throws RemoteBlockedIOException {
+    if (uri.getHost() == null) {
+      return;
+    }
+    try {
+      antiSsrfService.validateHost(uri.getHost());
+    }
+    catch (ValidationException e) {
+      throw new RemoteBlockedIOException("Access to remote " + uri + " blocked: " + e.getMessage());
+    }
+  }
+
   @Override
   protected void doStart() {
     super.doStart();
@@ -401,7 +437,19 @@ public class HuggingFaceProxyFacet
   @Nullable
   @Override
   protected Content getCachedContent(final Context context) throws IOException {
-    return content().get(target(context).assetPath()).orElse(null);
+    Content content = content().get(target(context).assetPath()).orElse(null);
+    return content != null && target(context).kind() == Kind.API ? withNextPage(content) : content;
+  }
+
+  /**
+   * Exposes the stored next-page link of an API response to {@link HuggingFaceHeadersHandler}.
+   */
+  private static Content withNextPage(final Content content) {
+    String nextPage = HuggingFaceContentFacet.nextPage(content);
+    if (nextPage != null) {
+      content.getAttributes().set(NEXT_PAGE, nextPage);
+    }
+    return content;
   }
 
   @Override
@@ -410,7 +458,8 @@ public class HuggingFaceProxyFacet
     return switch (target.kind()) {
       case FILE_CONTENT -> content().putFile(target.file(), content, expectedSha256(context));
       case FILE_METADATA -> content().putMetadata(target.assetPath(), FILE_METADATA_KIND, content);
-      case API -> content().putMetadata(target.assetPath(), API_KIND, content);
+      case API -> withNextPage(content().putApiResponse(
+          target.assetPath(), content, content.getAttributes().get(NEXT_PAGE, String.class)));
     };
   }
 
@@ -496,9 +545,13 @@ public class HuggingFaceProxyFacet
     return super.build3xxResponseContent(context, uri, stale, response, cacheInfo, isUnmodified);
   }
 
+  /**
+   * Upstream statuses passed on to the client: missing or inaccessible resources, and rate limiting (with its
+   * {@code Retry-After}), which clients back off from.
+   */
   private static boolean isHubClientError(final int status) {
     return status == HttpStatus.SC_NOT_FOUND || status == HttpStatus.SC_UNAUTHORIZED
-        || status == HttpStatus.SC_FORBIDDEN;
+        || status == HttpStatus.SC_FORBIDDEN || status == TOO_MANY_REQUESTS;
   }
 
   private static BypassHttpErrorException hubError(final HttpResponse response) {
@@ -509,7 +562,12 @@ public class HuggingFaceProxyFacet
       code = REPO_NOT_FOUND;
     }
     String reason = HuggingFaceErrors.encode(code, headerValue(response, X_ERROR_MESSAGE));
-    return new BypassHttpErrorException(status, reason, ArrayListMultimap.create());
+    ListMultimap<String, String> headers = ArrayListMultimap.create();
+    String retryAfter = headerValue(response, HttpHeaders.RETRY_AFTER);
+    if (retryAfter != null) {
+      headers.put(HttpHeaders.RETRY_AFTER, retryAfter);
+    }
+    return new BypassHttpErrorException(status, reason, headers);
   }
 
   // File metadata
@@ -523,6 +581,7 @@ public class HuggingFaceProxyFacet
     HttpClient client = facet(HttpClientFacet.class).getHttpClient();
     RequestConfig requestConfig = withoutRedirects(client);
     URI uri = getRemoteUrl().resolve(getUrl(context));
+    validateRemoteHost(uri);
 
     String commit = null;
     String linkedEtag = null;
@@ -609,48 +668,49 @@ public class HuggingFaceProxyFacet
   // API
 
   /**
-   * Fetches an API response, following and concatenating all pages of a paginated listing so that no upstream
-   * pagination link reaches the client, and strips XET hints.
+   * Fetches one API response, without its XET hints. For one page of a paginated listing, the link to the next page is
+   * kept (relative to the remote, so it can be served pointing at this repository) and stored with the response.
    */
   @Nullable
   private Content fetchApi(final Context context, @Nullable final Content stale) throws IOException {
-    Content first = super.fetch(context, stale);
-    if (first == null) {
+    Content upstream = super.fetch(context, stale);
+    if (upstream == null) {
       return null;
     }
     JsonNode body;
-    try (InputStream in = first.openInputStream()) {
+    try (InputStream in = upstream.openInputStream()) {
       body = objectMapper.readTree(in);
     }
     finally {
-      first.close();
+      upstream.close();
     }
-
-    String next = nextPageUrl(context);
-    for (int page = 1; next != null && body.isArray(); page++) {
-      if (page >= MAX_API_PAGES) {
-        log.warn("Listing {} has more than {} pages; truncating", context.getRequest().getPath(), MAX_API_PAGES);
-        break;
-      }
-      Content more = fetch(next, context, null);
-      if (more == null) {
-        break;
-      }
-      try (InputStream in = more.openInputStream()) {
-        ((ArrayNode) body).addAll((ArrayNode) objectMapper.readTree(in));
-      }
-      finally {
-        more.close();
-      }
-      next = nextPageUrl(context);
-    }
-
     stripXetHashes(body);
+
     Content content = new Content(new BytesPayload(objectMapper.writeValueAsBytes(body), JSON_CONTENT_TYPE));
-    content.getAttributes().set(Content.CONTENT_ETAG, first.getAttributes().get(Content.CONTENT_ETAG));
-    content.getAttributes().set(Content.CONTENT_LAST_MODIFIED, first.getAttributes().get(Content.CONTENT_LAST_MODIFIED));
-    content.getAttributes().set(CacheInfo.class, first.getAttributes().get(CacheInfo.class));
+    content.getAttributes().set(Content.CONTENT_ETAG, upstream.getAttributes().get(Content.CONTENT_ETAG));
+    content.getAttributes().set(Content.CONTENT_LAST_MODIFIED, upstream.getAttributes().get(Content.CONTENT_LAST_MODIFIED));
+    content.getAttributes().set(CacheInfo.class, upstream.getAttributes().get(CacheInfo.class));
+    String nextPage = relativeToRemote(nextPageUrl(context));
+    if (nextPage != null) {
+      content.getAttributes().set(NEXT_PAGE, nextPage);
+    }
     return content;
+  }
+
+  /**
+   * The part of an upstream URL after the remote URL, e.g. {@code api/models/x/tree/main?cursor=...}.
+   */
+  @Nullable
+  private String relativeToRemote(@Nullable final String url) {
+    if (url == null) {
+      return null;
+    }
+    String remote = getRemoteUrl().toString();
+    if (!url.startsWith(remote)) {
+      log.warn("Not following pagination link {} outside of {}", url, remote);
+      return null;
+    }
+    return url.substring(remote.length());
   }
 
   @Nullable

@@ -15,6 +15,7 @@ import javax.annotation.Nullable;
 import org.sonatype.nexus.common.hash.HashAlgorithm;
 import org.sonatype.nexus.repository.Facet;
 import org.sonatype.nexus.repository.cache.CacheInfo;
+import org.sonatype.nexus.repository.content.Asset;
 import org.sonatype.nexus.repository.content.facet.ContentFacet;
 import org.sonatype.nexus.repository.huggingface.HuggingFacePaths.FileRef;
 import org.sonatype.nexus.repository.view.Content;
@@ -50,6 +51,10 @@ public interface HuggingFaceContentFacet
    */
   String API_KIND = "api";
 
+  String HUGGINGFACE_ATTRIBUTES = "huggingface";
+
+  String NEXT_PAGE_ATTRIBUTE = "nextPage";
+
   Optional<Content> get(String path) throws IOException;
 
   /**
@@ -71,4 +76,21 @@ public interface HuggingFaceContentFacet
    * Stores a component-less asset.
    */
   Content putMetadata(String path, String kind, Payload content) throws IOException;
+
+  /**
+   * Stores a Hub API response, with the link to its next page if it is one page of a listing.
+   *
+   * @param nextPage path and query of the next page, relative to the repository
+   * @see #nextPage(Content)
+   */
+  Content putApiResponse(String path, Payload content, @Nullable String nextPage) throws IOException;
+
+  /**
+   * The next-page link of a stored API response.
+   */
+  @Nullable
+  static String nextPage(final Content content) {
+    Asset asset = content.getAttributes().get(Asset.class);
+    return asset == null ? null : asset.attributes(HUGGINGFACE_ATTRIBUTES).get(NEXT_PAGE_ATTRIBUTE, String.class);
+  }
 }

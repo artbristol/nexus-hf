@@ -30,10 +30,12 @@ public final class HuggingFacePaths
   private static final String SLASHED_REVISION = "refs/(?:pr|convert)/[^/]+";
 
   /**
-   * The repository id is matched lazily, so {@code owner/name} is only tried when {@code name/resolve} does not match.
+   * The repository id is {@code owner/name}, or a legacy {@code name} when that does not fit: so
+   * {@code /owner/resolve/resolve/main/x} is repository {@code owner/resolve}, not {@code owner} at revision
+   * {@code resolve}.
    */
   public static final String FILE_REGEX =
-      "^/(?:(datasets|spaces)/)?([^/]+(?:/[^/]+)??)/resolve/(" + SLASHED_REVISION + "|[^/]+)/(.+)$";
+      "^/(?:(datasets|spaces)/)?([^/]+(?:/[^/]+)?)/resolve/(" + SLASHED_REVISION + "|[^/]+)/(.+)$";
 
   private static final Pattern SLASHED_REVISION_PATTERN =
       Pattern.compile("(/(?:resolve|revision|tree|paths-info|commits)/)refs/(pr|convert)/");

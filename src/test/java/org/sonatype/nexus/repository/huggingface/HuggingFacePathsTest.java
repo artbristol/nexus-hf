@@ -69,6 +69,33 @@ public class HuggingFacePathsTest
   }
 
   @Test
+  public void prefersOwnerAndNameOverLegacyRepositoryIds() {
+    // a repository called "resolve"
+    assertEquals(new FileRef(RepoType.MODEL, "owner/resolve", "main", "x.bin"),
+        HuggingFacePaths.parseFile("/owner/resolve/resolve/main/x.bin").orElseThrow());
+    // legacy repository with a directory called "resolve"
+    assertEquals(new FileRef(RepoType.MODEL, "gpt2", "main", "resolve/x.bin"),
+        HuggingFacePaths.parseFile("/gpt2/resolve/main/resolve/x.bin").orElseThrow());
+  }
+
+  /**
+   * The repository sees decoded paths; whatever a file is called, it must come back out unchanged.
+   */
+  @Test
+  public void fileNamesWithAnyCharactersRoundTrip() {
+    for (String file : new String[]{
+        "examples_Rebecca_(1939_poster)_Small.jpeg", "with space.txt", "plus+sign.txt", "hash#tag.txt",
+        "percent%20literal.txt", "question?mark.txt", "ünïcødé/文件.txt", "semi;colon&amp.txt", "[brackets].txt",
+        "deep/er/nest/ed/file.bin", ".hidden", "trailing.dot."}) {
+      String path = "/datasets/owner/name.with.dots/resolve/main/" + file;
+      FileRef ref = HuggingFacePaths.parseFile(path).orElseThrow(() -> new AssertionError(file));
+      assertEquals(file, ref.file());
+      assertEquals("owner/name.with.dots", ref.repoId());
+      assertEquals(path, ref.path());
+    }
+  }
+
+  @Test
   public void parsesSlashedRevisions() {
     assertEquals(new FileRef(RepoType.MODEL, "openai-community/gpt2", "refs/pr/1", "config.json"),
         HuggingFacePaths.parseFile("/openai-community/gpt2/resolve/refs/pr/1/config.json").orElseThrow());

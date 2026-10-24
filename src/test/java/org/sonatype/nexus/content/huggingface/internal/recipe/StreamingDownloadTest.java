@@ -107,6 +107,61 @@ public class StreamingDownloadTest
   }
 
   @Test
+  public void emptyFile() throws Exception {
+    // git blob id of an empty file
+    HuggingFaceFileInfo info = new HuggingFaceFileInfo(COMMIT, "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391", 0L);
+    StreamingDownload download = new StreamingDownload(file, info, null);
+    Future<byte[]> reader = executor.submit(() -> readAll(download));
+    download.download(new ByteArrayInputStream(new byte[0]));
+    assertArrayEquals(new byte[0], reader.get(30, TimeUnit.SECONDS));
+  }
+
+  /**
+   * The chunk hold-back must still release everything when the size is an exact multiple of the chunk size.
+   */
+  @Test
+  public void sizeThatIsAMultipleOfTheChunkSize() throws Exception {
+    byte[] content = randomBytes(2 * 1024 * 1024);
+    StreamingDownload download = new StreamingDownload(file, lfsInfo(content), null);
+    Future<byte[]> reader = executor.submit(() -> readAll(download));
+    download.download(new ByteArrayInputStream(content));
+    assertArrayEquals(content, reader.get(30, TimeUnit.SECONDS));
+  }
+
+  /**
+   * Without size or a recognisable etag there is nothing to verify against; the content is passed on as is.
+   */
+  @Test
+  public void unverifiableContentIsStillServed() throws Exception {
+    byte[] content = randomBytes(1500);
+    StreamingDownload download = new StreamingDownload(file, new HuggingFaceFileInfo(COMMIT, "W-opaque", null), null);
+    download.download(new ByteArrayInputStream(content));
+    assertArrayEquals(content, readAll(download));
+  }
+
+  @Test
+  public void readerWaitingForTheFirstByteFailsWhenUpstreamFails() throws Exception {
+    byte[] content = randomBytes(1000);
+    StreamingDownload download = new StreamingDownload(file, lfsInfo(content), null);
+    Future<byte[]> reader = executor.submit(() -> readAll(download));
+    InputStream broken = new InputStream()
+    {
+      @Override
+      public int read() throws IOException {
+        throw new IOException("connection reset");
+      }
+    };
+    assertThrows(IOException.class, () -> download.download(broken));
+    try {
+      reader.get(30, TimeUnit.SECONDS);
+      fail("reader must fail");
+    }
+    catch (java.util.concurrent.ExecutionException e) {
+      assertTrue(e.getCause() instanceof IOException);
+    }
+  }
+
+  @Test
   public void truncatedContentFails() {
     byte[] content = randomBytes(1000);
     StreamingDownload download = new StreamingDownload(file, lfsInfo(content), null);

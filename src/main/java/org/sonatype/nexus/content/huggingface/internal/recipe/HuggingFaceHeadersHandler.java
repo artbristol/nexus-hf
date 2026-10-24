@@ -15,6 +15,7 @@ import org.sonatype.nexus.repository.view.Context;
 import org.sonatype.nexus.repository.view.Handler;
 import org.sonatype.nexus.repository.view.Response;
 
+import com.google.common.net.HttpHeaders;
 import org.springframework.stereotype.Component;
 
 import static org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo.X_LINKED_ETAG;
@@ -22,8 +23,9 @@ import static org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo.X_LI
 import static org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo.X_REPO_COMMIT;
 
 /**
- * Adds the Hub headers that {@code huggingface_hub} requires on file responses ({@code X-Repo-Commit} is mandatory).
- * The plain {@code ETag} is set from the same metadata by the {@code ContentHeadersHandler}.
+ * Adds the Hub headers that {@code huggingface_hub} requires on file responses ({@code X-Repo-Commit} is mandatory),
+ * and the pagination link of API listings. The plain {@code ETag} is set from the same metadata by the
+ * {@code ContentHeadersHandler}.
  */
 @Component
 public class HuggingFaceHeadersHandler
@@ -34,6 +36,10 @@ public class HuggingFaceHeadersHandler
   public Response handle(@Nonnull final Context context) throws Exception {
     Response response = context.proceed();
     if (response.getStatus().isSuccessful() && response.getPayload() instanceof Content content) {
+      String nextPage = content.getAttributes().get(HuggingFaceProxyFacet.NEXT_PAGE, String.class);
+      if (nextPage != null) {
+        response.getHeaders().replace(HttpHeaders.LINK, "<" + context.getRepository().getUrl() + "/" + nextPage + ">; rel=\"next\"");
+      }
       HuggingFaceFileInfo info = content.getAttributes().get(HuggingFaceFileInfo.class);
       if (info != null) {
         response.getHeaders().replace(X_REPO_COMMIT, info.commit());

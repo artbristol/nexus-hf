@@ -8,6 +8,7 @@ package org.sonatype.nexus.content.huggingface.internal.recipe;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.util.Map;
 import java.util.Optional;
 
 import javax.annotation.Nullable;
@@ -103,6 +104,26 @@ public class HuggingFaceContentFacetImpl
         .component(component)
         .blob(blob)
         .save();
+  }
+
+  @Override
+  public Content putApiResponse(
+      final String path,
+      final Payload content,
+      @Nullable final String nextPage) throws IOException
+  {
+    try (TempBlob blob = blobs().ingest(content, HASHING)) {
+      FluentAsset asset = assets()
+          .path(path)
+          .kind(API_KIND)
+          .blob(blob)
+          .save()
+          .markAsCached(content);
+      asset = nextPage == null
+          ? asset.withoutAttribute(HUGGINGFACE_ATTRIBUTES)
+          : asset.withAttribute(HUGGINGFACE_ATTRIBUTES, Map.of(NEXT_PAGE_ATTRIBUTE, nextPage));
+      return asset.download();
+    }
   }
 
   @Override

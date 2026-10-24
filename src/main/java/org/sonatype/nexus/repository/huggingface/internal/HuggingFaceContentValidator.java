@@ -26,7 +26,6 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import static java.util.Objects.requireNonNull;
-import static org.sonatype.nexus.repository.view.ContentTypes.APPLICATION_JSON;
 import static org.sonatype.nexus.repository.view.ContentTypes.APPLICATION_OCTET_STREAM;
 
 /**
@@ -37,8 +36,8 @@ import static org.sonatype.nexus.repository.view.ContentTypes.APPLICATION_OCTET_
  * nothing to validate against, so it is accepted; any content whose type can be detected is still checked against its
  * file name, which catches e.g. an HTML error page served as {@code config.json}.
  *
- * Hub API responses have extension-less paths (e.g. {@code /api/models/owner/name/revision/main}); they are validated
- * and typed as the JSON they are declared to be, rather than as the plain text detection would make of them.
+ * Hub API responses live under {@code /api/}, at paths whose last segment is a revision or directory name rather than
+ * a file name (e.g. {@code /api/models/owner/name/revision/main}); they are validated and typed as JSON.
  */
 @Component
 @Qualifier(HuggingFaceFormat.NAME)
@@ -46,6 +45,8 @@ public class HuggingFaceContentValidator
     implements ContentValidator
 {
   private static final Logger log = LoggerFactory.getLogger(HuggingFaceContentValidator.class);
+
+  private static final String API_PREFIX = "/api/";
 
   private final DefaultContentValidator defaultContentValidator;
 
@@ -70,8 +71,8 @@ public class HuggingFaceContentValidator
       @Nullable final String declaredContentType) throws IOException
   {
     String name = contentName;
-    if (name != null && APPLICATION_JSON.equals(declaredContentType) && !hasExtension(name)) {
-      // the query string of API paths would hide the extension from type detection
+    if (name != null && name.startsWith(API_PREFIX)) {
+      // whatever the last segment looks like (a directory "data.v2", a revision "v1.0"), this is JSON
       int query = name.indexOf('?');
       name = (query < 0 ? name : name.substring(0, query)) + ".json";
     }
@@ -80,11 +81,6 @@ public class HuggingFaceContentValidator
         strict, contentSupplier, mimeRulesSource, name, declaredContentType);
   }
 
-  private static boolean hasExtension(final String path) {
-    String baseName = path.substring(path.lastIndexOf('/') + 1);
-    int query = baseName.indexOf('?');
-    return (query < 0 ? baseName : baseName.substring(0, query)).contains(".");
-  }
 
   private boolean isOpaque(final InputStreamSupplier contentSupplier, @Nullable final String contentName)
       throws IOException
