@@ -10,14 +10,22 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.file.Files;
 import java.util.Iterator;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import javax.annotation.Nullable;
 
+import org.sonatype.nexus.common.io.InputStreamSupplier;
 import org.sonatype.nexus.content.huggingface.HuggingFaceContentFacet;
 import org.sonatype.nexus.repository.cache.CacheController;
 import org.sonatype.nexus.repository.cache.CacheInfo;
@@ -34,6 +42,7 @@ import org.sonatype.nexus.repository.view.Context;
 import org.sonatype.nexus.repository.view.Payload;
 import org.sonatype.nexus.repository.view.Request;
 import org.sonatype.nexus.repository.view.payloads.BytesPayload;
+import org.sonatype.nexus.repository.view.payloads.StreamPayload;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -48,6 +57,7 @@ import org.apache.http.HttpStatus;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.Configurable;
+import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpHead;
 import org.apache.http.client.methods.HttpRequestBase;
 import org.apache.http.client.utils.HttpClientUtils;
@@ -94,6 +104,13 @@ public class HuggingFaceProxyFacet
   private static final String META_SUFFIX = ".json";
 
   private final ObjectMapper objectMapper = new ObjectMapper();
+
+  /**
+   * Downloads in progress, by asset path.
+   */
+  private final ConcurrentMap<String, CompletableFuture<StreamingDownload>> downloads = new ConcurrentHashMap<>();
+
+  private ExecutorService downloadExecutor;
 
   enum Kind
   {
@@ -177,9 +194,187 @@ public class HuggingFaceProxyFacet
       return withFileInfo(new Content(new HeadPayload(info.size())), info);
     }
 
-    setTarget(context, Target.fileContent(file.at(info.commit())));
+    FileRef pinned = file.at(info.commit());
+    setTarget(context, Target.fileContent(pinned));
+    if (info.size() != null && getCachedContent(context) == null) {
+      Content streamed = streamFile(context, pinned, info);
+      if (streamed != null) {
+        return withFileInfo(streamed, info);
+      }
+    }
     Content content = super.get(context);
     return content == null ? null : withFileInfo(content, info);
+  }
+
+  // Streaming of files that are not cached yet
+
+  /**
+   * Serves a file that is not cached yet while it downloads, rather than after: model files are often many GB, and
+   * {@code huggingface_hub} gives up after about a minute without data. Concurrent requests for the same file share
+   * one upstream download, which completes and is cached even if the clients go away.
+   *
+   * @return {@code null} if the file cannot be streamed, to fall back to the regular proxy path
+   * @see StreamingDownload
+   */
+  @Nullable
+  private Content streamFile(final Context context, final FileRef file, final HuggingFaceFileInfo info)
+      throws IOException
+  {
+    StreamingDownload active = joinOrStartDownload(context, file, info);
+    if (active == null) {
+      return null;
+    }
+    InputStreamSupplier readers = () -> {
+      InputStream in = active.openReader();
+      if (in != null) {
+        return in;
+      }
+      // finished between the lookup and now
+      Optional<Content> cached = content().get(file.path());
+      if (cached.isEmpty()) {
+        throw new IOException("Download of " + file.path() + " failed");
+      }
+      return cached.get().openInputStream();
+    };
+    return new Content(new StreamPayload(readers, info.size(), active.contentType()));
+  }
+
+  /**
+   * Joins the download of the file in progress, or starts one. The slot is taken before contacting upstream, so
+   * concurrent requests never open a second upstream connection; they wait for the first one's response instead.
+   *
+   * @return {@code null} if the download could not be started
+   */
+  @Nullable
+  private StreamingDownload joinOrStartDownload(
+      final Context context,
+      final FileRef file,
+      final HuggingFaceFileInfo info) throws IOException
+  {
+    CompletableFuture<StreamingDownload> slot = new CompletableFuture<>();
+    CompletableFuture<StreamingDownload> existing = downloads.putIfAbsent(file.path(), slot);
+    if (existing != null) {
+      try {
+        return existing.get();
+      }
+      catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IOException("Interrupted while waiting for upstream", e);
+      }
+      catch (ExecutionException e) {
+        // the request that started it got the upstream error
+        return null;
+      }
+    }
+    try {
+      StreamingDownload download = startDownload(context, file, info, slot);
+      slot.complete(download);
+      if (download == null) {
+        downloads.remove(file.path(), slot);
+      }
+      return download;
+    }
+    catch (IOException | RuntimeException e) {
+      downloads.remove(file.path(), slot);
+      slot.completeExceptionally(e);
+      throw e;
+    }
+  }
+
+  /**
+   * Requests the file in the request thread, so upstream errors reach this client, and hands the body over to a
+   * background download.
+   */
+  @Nullable
+  private StreamingDownload startDownload(
+      final Context context,
+      final FileRef file,
+      final HuggingFaceFileInfo info,
+      final CompletableFuture<StreamingDownload> slot) throws IOException
+  {
+    HttpClient client = facet(HttpClientFacet.class).getHttpClient();
+    URI uri = getRemoteUrl().resolve(getUrl(context));
+    HttpGet request = new HttpGet(uri);
+    HttpResponse response = execute(context, client, request);
+    int status = response.getStatusLine().getStatusCode();
+    if (status != HttpStatus.SC_OK) {
+      try {
+        if (isHubClientError(status)) {
+          throw hubError(response);
+        }
+        mayThrowProxyServiceException(response);
+        log.warn("Unexpected upstream status {} for {}", status, uri);
+        return null;
+      }
+      finally {
+        request.abort();
+      }
+    }
+
+    StreamingDownload download;
+    try {
+      download = new StreamingDownload(
+          Files.createTempFile("huggingface-", ".part"), info, headerValue(response, HttpHeaders.CONTENT_TYPE));
+    }
+    catch (IOException e) {
+      request.abort();
+      throw e;
+    }
+    CacheInfo cacheInfo = getCacheController(context).current();
+    downloadExecutor.execute(() -> runDownload(file, download, request, response, cacheInfo, slot));
+    return download;
+  }
+
+  private void runDownload(
+      final FileRef file,
+      final StreamingDownload download,
+      final HttpGet request,
+      final HttpResponse response,
+      final CacheInfo cacheInfo,
+      final CompletableFuture<StreamingDownload> slot)
+  {
+    boolean complete = false;
+    try (InputStream upstream = response.getEntity().getContent()) {
+      download.download(upstream);
+      complete = true;
+      content().putFile(file, download.file(), download.contentType(), cacheInfo);
+      log.debug("Downloaded and stored {} in {}", file.path(), getRepository().getName());
+    }
+    catch (Exception e) {
+      download.fail(e instanceof IOException io ? io : new IOException(e));
+      log.warn("Download of {} into {} failed: {}", file.path(), getRepository().getName(), e.toString());
+    }
+    finally {
+      downloads.remove(file.path(), slot);
+      try {
+        download.delete();
+      }
+      catch (IOException e) {
+        log.warn("Could not delete {}: {}", download.file(), e.toString());
+      }
+      if (!complete) {
+        // closing would drain the rest of a possibly multi-GB body
+        request.abort();
+      }
+      HttpClientUtils.closeQuietly(response);
+    }
+  }
+
+  @Override
+  protected void doStart() {
+    super.doStart();
+    String name = "huggingface-download-" + getRepository().getName();
+    downloadExecutor = Executors.newCachedThreadPool(runnable -> {
+      Thread thread = new Thread(runnable, name);
+      thread.setDaemon(true);
+      return thread;
+    });
+  }
+
+  @Override
+  protected void doStop() throws Exception {
+    downloadExecutor.shutdownNow();
+    super.doStop();
   }
 
   private static Content withFileInfo(final Content content, final HuggingFaceFileInfo info) {

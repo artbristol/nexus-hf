@@ -7,12 +7,14 @@
 package org.sonatype.nexus.content.huggingface.internal.recipe;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Optional;
 
 import javax.annotation.Nullable;
 
 import org.sonatype.nexus.content.huggingface.HuggingFaceContentFacet;
 import org.sonatype.nexus.repository.InvalidContentException;
+import org.sonatype.nexus.repository.cache.CacheInfo;
 import org.sonatype.nexus.repository.content.facet.ContentFacetSupport;
 import org.sonatype.nexus.repository.content.fluent.FluentAsset;
 import org.sonatype.nexus.repository.content.fluent.FluentComponent;
@@ -71,21 +73,36 @@ public class HuggingFaceContentFacetImpl
               "SHA-256 of " + file.path() + " is " + actual + ", upstream reported " + expectedSha256);
         }
       }
-      FluentComponent component = components()
-          .name(file.name())
-          .namespace(file.namespace())
-          .version(file.revision())
-          .kind(file.type().kind())
-          .getOrCreate();
-      return assets()
-          .path(file.path())
-          .kind(FILE_KIND)
-          .component(component)
-          .blob(blob)
-          .save()
-          .markAsCached(content)
-          .download();
+      return saveFile(file, blob).markAsCached(content).download();
     }
+  }
+
+  @Override
+  public Content putFile(
+      final FileRef file,
+      final Path path,
+      @Nullable final String contentType,
+      final CacheInfo cacheInfo) throws IOException
+  {
+    checkArgument(file.isCommit(), "Files are stored at commit revisions: %s", file);
+    try (TempBlob blob = blobs().ingest(path, contentType, HASHING, false)) {
+      return saveFile(file, blob).markAsCached(cacheInfo).download();
+    }
+  }
+
+  private FluentAsset saveFile(final FileRef file, final TempBlob blob) {
+    FluentComponent component = components()
+        .name(file.name())
+        .namespace(file.namespace())
+        .version(file.revision())
+        .kind(file.type().kind())
+        .getOrCreate();
+    return assets()
+        .path(file.path())
+        .kind(FILE_KIND)
+        .component(component)
+        .blob(blob)
+        .save();
   }
 
   @Override

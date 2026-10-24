@@ -7,12 +7,14 @@
 package org.sonatype.nexus.content.huggingface;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Optional;
 
 import javax.annotation.Nullable;
 
 import org.sonatype.nexus.common.hash.HashAlgorithm;
 import org.sonatype.nexus.repository.Facet;
+import org.sonatype.nexus.repository.cache.CacheInfo;
 import org.sonatype.nexus.repository.content.facet.ContentFacet;
 import org.sonatype.nexus.repository.huggingface.HuggingFacePaths.FileRef;
 import org.sonatype.nexus.repository.view.Content;
@@ -57,6 +59,13 @@ public interface HuggingFaceContentFacet
    * @param expectedSha256 SHA-256 the content must have, if known
    */
   Content putFile(FileRef file, Payload content, @Nullable String expectedSha256) throws IOException;
+
+  /**
+   * Stores a repository file from a local file, which may be hard-linked into the blob store.
+   *
+   * @param file the file, at a commit hash revision
+   */
+  Content putFile(FileRef file, Path path, @Nullable String contentType, CacheInfo cacheInfo) throws IOException;
 
   /**
    * Stores a component-less asset.
