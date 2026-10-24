@@ -20,6 +20,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -93,6 +94,11 @@ public class HuggingFaceProxyFacet
     extends ContentProxyFacetSupport
 {
   private static final int MAX_HUB_REDIRECTS = 5;
+
+  /**
+   * How often a file download whose connection failed is resumed before giving up.
+   */
+  private static final int MAX_RESUMES = 3;
 
   /**
    * Content attribute: path and query of the next page of a listing, relative to the repository.
@@ -201,6 +207,9 @@ public class HuggingFaceProxyFacet
     HuggingFaceFileInfo info = readFileInfo(metadata);
     // read by store() to verify the content
     context.getAttributes().set(HuggingFaceFileInfo.class, info);
+    if (!file.isCommit()) {
+      rememberForCommit(file.at(info.commit()), info);
+    }
 
     if (HttpMethods.HEAD.equals(context.getRequest().getAction())) {
       return withFileInfo(new Content(new HeadPayload(info.size())), info);
@@ -334,21 +343,52 @@ public class HuggingFaceProxyFacet
       throw e;
     }
     CacheInfo cacheInfo = getCacheController(context).current();
-    downloadExecutor.execute(() -> runDownload(file, download, request, response, cacheInfo, slot));
+    downloadExecutor.execute(() -> runDownload(file, download, client, request, response, cacheInfo, slot));
     return download;
+  }
+
+  /**
+   * The upstream body of a file: the response already received, then, to resume, ranged requests for the rest.
+   */
+  private StreamingDownload.Upstream upstreamBody(final HttpClient client, final URI uri, final HttpResponse first) {
+    AtomicBoolean firstUsed = new AtomicBoolean();
+    return offset -> {
+      if (!firstUsed.getAndSet(true)) {
+        return first.getEntity().getContent();
+      }
+      log.debug("Resuming download of {} at byte {}", uri, offset);
+      HttpGet resume = new HttpGet(uri);
+      if (offset > 0) {
+        resume.setHeader(HttpHeaders.RANGE, "bytes=" + offset + "-");
+      }
+      HttpResponse response = client.execute(resume);
+      int status = response.getStatusLine().getStatusCode();
+      if (status == HttpStatus.SC_PARTIAL_CONTENT) {
+        return response.getEntity().getContent();
+      }
+      if (status == HttpStatus.SC_OK) {
+        // range not supported, or not asked for: skip what we have
+        InputStream in = response.getEntity().getContent();
+        in.skipNBytes(offset);
+        return in;
+      }
+      resume.abort();
+      throw new IOException("Upstream answered " + status + " resuming " + uri + " at " + offset);
+    };
   }
 
   private void runDownload(
       final FileRef file,
       final StreamingDownload download,
+      final HttpClient client,
       final HttpGet request,
       final HttpResponse response,
       final CacheInfo cacheInfo,
       final CompletableFuture<StreamingDownload> slot)
   {
     boolean complete = false;
-    try (InputStream upstream = response.getEntity().getContent()) {
-      download.download(upstream);
+    try {
+      download.download(upstreamBody(client, request.getURI(), response), MAX_RESUMES);
       complete = true;
       content().putFile(file, download.file(), download.contentType(), cacheInfo);
       log.debug("Downloaded and stored {} in {}", file.path(), getRepository().getName());
@@ -411,6 +451,20 @@ public class HuggingFaceProxyFacet
   protected void doStop() throws Exception {
     downloadExecutor.shutdownNow();
     super.doStop();
+  }
+
+  /**
+   * What a branch or tag resolved to is also what the commit has, for good: storing it saves clients that ask by
+   * commit hash (as {@code snapshot_download} does for every file) an upstream request, and lets them be served while
+   * the Hub is unreachable.
+   */
+  private void rememberForCommit(final FileRef pinned, final HuggingFaceFileInfo info) throws IOException {
+    String path = Target.fileMetadata(pinned).assetPath();
+    if (content().get(path).isEmpty()) {
+      Content metadata = new Content(new BytesPayload(objectMapper.writeValueAsBytes(info), JSON_CONTENT_TYPE));
+      metadata.getAttributes().set(CacheInfo.class, cacheControllerHolder.getContentCacheController().current());
+      content().putMetadata(path, FILE_METADATA_KIND, metadata);
+    }
   }
 
   private static Content withFileInfo(final Content content, final HuggingFaceFileInfo info) {
@@ -624,18 +678,16 @@ public class HuggingFaceProxyFacet
           throw hubError(response);
         }
         mayThrowProxyServiceException(response);
-        log.warn("Unexpected upstream status {} for {}", status, uri);
-        return null;
+        throw new IOException("Unexpected upstream status " + status + " for " + uri);
       }
       finally {
         HttpClientUtils.closeQuietly(response);
       }
     }
-    log.warn("Too many redirects resolving {}", uri);
-    return null;
+    // a failure of the remote, not a missing file: answered with 502 and not negatively cached
+    throw new IOException("Too many redirects resolving " + uri);
   }
 
-  @Nullable
   private Content fileMetadataContent(
       final Context context,
       final URI uri,
@@ -644,9 +696,9 @@ public class HuggingFaceProxyFacet
       @Nullable final Long size) throws IOException
   {
     if (commit == null) {
-      log.warn("Upstream response for {} has no {} header; is the remote URL a Hugging Face Hub?", uri,
-          X_REPO_COMMIT);
-      return null;
+      // a failure of the remote, not a missing file: answered with 502 and not negatively cached
+      throw new IOException(
+          "Upstream response for " + uri + " has no " + X_REPO_COMMIT + " header; is the remote URL a Hugging Face Hub?");
     }
     HuggingFaceFileInfo info = new HuggingFaceFileInfo(commit, etag, size);
     Content content = new Content(new BytesPayload(objectMapper.writeValueAsBytes(info), JSON_CONTENT_TYPE));

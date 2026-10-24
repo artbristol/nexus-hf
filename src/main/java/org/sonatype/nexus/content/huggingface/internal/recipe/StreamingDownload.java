@@ -37,7 +37,10 @@ import static java.util.Objects.requireNonNull;
  */
 final class StreamingDownload
 {
-  private static final int CHUNK_SIZE = 1024 * 1024;
+  /**
+   * Also the granularity of the hold-back: readers get bytes once the next chunk has arrived.
+   */
+  private static final int CHUNK_SIZE = 64 * 1024;
 
   private static final long READER_WAIT_MILLIS = 1000;
 
@@ -75,24 +78,74 @@ final class StreamingDownload
   }
 
   /**
-   * Copies the upstream body into the file, releasing bytes to readers as they are verified.
-   *
-   * @throws IOException if reading fails or the content does not match the file metadata; readers fail too
+   * The upstream body, from a given offset. Called once per connection: first with 0, then, to resume after a
+   * transport failure, with how much has been written, which may still be 0. Each call must return a new stream.
+   */
+  @FunctionalInterface
+  interface Upstream
+  {
+    /**
+     * @param offset 0 for the whole body, or where to resume
+     */
+    InputStream open(long offset) throws IOException;
+  }
+
+  /**
+   * Copies an upstream body that cannot be resumed.
    */
   void download(final InputStream upstream) throws IOException {
+    download(offset -> {
+      if (offset > 0) {
+        throw new IOException("Cannot resume");
+      }
+      return upstream;
+    }, 0);
+  }
+
+  /**
+   * Copies the upstream body into the file, releasing bytes to readers as they are verified. A transport failure
+   * (connection dropped or timed out, body ending early) is resumed where it stopped, up to {@code maxResumes} times,
+   * without readers noticing; content that does not match the file metadata is not retried.
+   *
+   * @throws IOException if the download fails for good; readers fail too
+   */
+  void download(final Upstream upstream, final int maxResumes) throws IOException {
     try {
       MessageDigest digest = newDigest();
       long written = 0;
+      int resumes = 0;
+      InputStream in = upstream.open(0);
       try (OutputStream out = Files.newOutputStream(file)) {
         byte[] buffer = new byte[CHUNK_SIZE];
-        int n;
-        while ((n = upstream.readNBytes(buffer, 0, buffer.length)) > 0) {
+        while (true) {
+          int n;
+          try {
+            n = in.readNBytes(buffer, 0, buffer.length);
+            if (n <= 0 && info.size() != null && written < info.size()) {
+              throw new IOException("Body ended after " + written + " of " + info.size() + " bytes");
+            }
+          }
+          catch (IOException e) {
+            // bytes read into the buffer before the failure are discarded and requested again
+            closeQuietly(in);
+            if (resumes++ >= maxResumes) {
+              throw e;
+            }
+            in = upstream.open(written);
+            continue;
+          }
+          if (n <= 0) {
+            break;
+          }
           out.write(buffer, 0, n);
           out.flush();
           digest.update(buffer, 0, n);
           release(written); // everything but this chunk
           written += n;
         }
+      }
+      finally {
+        closeQuietly(in);
       }
       verify(written, digest);
       synchronized (lock) {
@@ -104,6 +157,15 @@ final class StreamingDownload
     catch (IOException | RuntimeException e) {
       fail(e instanceof IOException io ? io : new IOException(e));
       throw e;
+    }
+  }
+
+  private static void closeQuietly(final InputStream in) {
+    try {
+      in.close();
+    }
+    catch (IOException | RuntimeException e) {
+      // nothing more to do with it
     }
   }
 

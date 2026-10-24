@@ -13,7 +13,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.List;
 import java.util.Random;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -106,6 +108,121 @@ public class StreamingDownloadTest
     assertNull("no new readers after a failure", download.openReader());
   }
 
+  /**
+   * A dropped connection is resumed where it stopped; readers that were waiting see one uninterrupted, correct body.
+   */
+  @Test
+  public void resumesAfterTransportFailures() throws Exception {
+    byte[] content = randomBytes(3 * 1024 * 1024 + 7);
+    StreamingDownload download = new StreamingDownload(file, lfsInfo(content), null);
+    List<Long> opened = new ArrayList<>();
+    StreamingDownload.Upstream flaky = offset -> {
+      opened.add(offset);
+      InputStream rest = new ByteArrayInputStream(content, (int) offset, content.length - (int) offset);
+      // the first two connections drop after 1 MB (not on a chunk boundary)
+      return opened.size() <= 2 ? new FailingAfter(rest, 1024 * 1024 + 123) : rest;
+    };
+    Future<byte[]> reader = executor.submit(() -> readAll(download));
+    download.download(flaky, 3);
+    assertArrayEquals(content, reader.get(30, TimeUnit.SECONDS));
+    assertEquals(0L, (long) opened.get(0));
+    assertEquals(3, opened.size());
+    assertTrue("resumed, not restarted", opened.get(1) > 0 && opened.get(2) > opened.get(1));
+  }
+
+  /**
+   * A connection that fails before a whole chunk has arrived is reconnected from the start.
+   */
+  @Test
+  public void reconnectsWhenNothingWasWrittenYet() throws Exception {
+    byte[] content = randomBytes(300_000);
+    StreamingDownload download = new StreamingDownload(file, lfsInfo(content), null);
+    List<Long> opened = new ArrayList<>();
+    StreamingDownload.Upstream failsEarly = offset -> {
+      opened.add(offset);
+      InputStream rest = new ByteArrayInputStream(content, (int) offset, content.length - (int) offset);
+      return opened.size() == 1 ? new FailingAfter(rest, 1000) : rest;
+    };
+    download.download(failsEarly, 3);
+    assertArrayEquals(content, readAll(download));
+    assertEquals(List.of(0L, 0L), opened);
+  }
+
+  @Test
+  public void givesUpAfterTooManyTransportFailures() {
+    byte[] content = randomBytes(3 * 1024 * 1024);
+    StreamingDownload download = new StreamingDownload(file, lfsInfo(content), null);
+    StreamingDownload.Upstream broken = offset -> new FailingAfter(
+        new ByteArrayInputStream(content, (int) offset, content.length - (int) offset), 100_000);
+    assertThrows(IOException.class, () -> download.download(broken, 1));
+  }
+
+  /**
+   * A body that ends early without an error (no Content-Length upstream) is resumed too.
+   */
+  @Test
+  public void resumesABodyThatEndsEarly() throws Exception {
+    byte[] content = randomBytes(2 * 1024 * 1024 + 1);
+    StreamingDownload download = new StreamingDownload(file, lfsInfo(content), null);
+    List<Long> opened = new ArrayList<>();
+    StreamingDownload.Upstream shortFirst = offset -> {
+      opened.add(offset);
+      int end = opened.size() == 1 ? 1000 : content.length;
+      return new ByteArrayInputStream(content, (int) offset, end - (int) offset);
+    };
+    download.download(shortFirst, 3);
+    assertArrayEquals(content, readAll(download));
+    assertEquals(List.of(0L, 1000L), opened);
+  }
+
+  @Test
+  public void corruptContentIsNotRetried() {
+    byte[] content = randomBytes(10_000);
+    byte[] corrupt = content.clone();
+    corrupt[5000] ^= 1;
+    StreamingDownload download = new StreamingDownload(file, lfsInfo(content), null);
+    List<Long> opened = new ArrayList<>();
+    StreamingDownload.Upstream upstream = offset -> {
+      opened.add(offset);
+      return new ByteArrayInputStream(corrupt);
+    };
+    assertThrows(IOException.class, () -> download.download(upstream, 3));
+    assertEquals(1, opened.size());
+  }
+
+  private static final class FailingAfter
+      extends InputStream
+  {
+    private final InputStream delegate;
+
+    private long remaining;
+
+    FailingAfter(final InputStream delegate, final long bytes) {
+      this.delegate = delegate;
+      this.remaining = bytes;
+    }
+
+    @Override
+    public int read() throws IOException {
+      if (remaining-- <= 0) {
+        throw new IOException("connection reset");
+      }
+      return delegate.read();
+    }
+
+    @Override
+    public int read(final byte[] b, final int off, final int len) throws IOException {
+      if (remaining <= 0) {
+        throw new IOException("connection reset");
+      }
+      int n = delegate.read(b, off, (int) Math.min(len, remaining));
+      if (n > 0) {
+        remaining -= n;
+      }
+      return n;
+    }
+  }
+
   @Test
   public void emptyFile() throws Exception {
     // git blob id of an empty file
@@ -167,8 +284,7 @@ public class StreamingDownloadTest
     StreamingDownload download = new StreamingDownload(file, lfsInfo(content), null);
     byte[] truncated = new byte[999];
     System.arraycopy(content, 0, truncated, 0, truncated.length);
-    IOException e = assertThrows(IOException.class, () -> download.download(new ByteArrayInputStream(truncated)));
-    assertEquals("Received 999 bytes, upstream reported 1000", e.getMessage());
+    assertThrows(IOException.class, () -> download.download(new ByteArrayInputStream(truncated)));
   }
 
   @Test
