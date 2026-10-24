@@ -72,7 +72,8 @@ Upstream XET is never exposed, so clients always use plain HTTP downloads throug
 mvn package
 ```
 
-Requires JDK 21 or later. All dependencies come from Maven Central; the jar is
+Requires JDK 25 or later (enforced by the Nexus parent POM; the jar itself targets Java 21, like
+Nexus). All dependencies come from Maven Central; the jar is
 `target/nexus-repository-huggingface-<version>.jar`.
 
 ## Request handling
