@@ -24,7 +24,9 @@ import org.sonatype.nexus.repository.cache.CacheInfo;
 import org.sonatype.nexus.repository.content.facet.ContentProxyFacetSupport;
 import org.sonatype.nexus.repository.http.HttpMethods;
 import org.sonatype.nexus.repository.httpclient.HttpClientFacet;
+import org.sonatype.nexus.repository.proxy.BypassHttpErrorException;
 import org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo;
+import org.sonatype.nexus.repository.huggingface.HuggingFaceErrors;
 import org.sonatype.nexus.repository.huggingface.HuggingFacePaths;
 import org.sonatype.nexus.repository.huggingface.HuggingFacePaths.FileRef;
 import org.sonatype.nexus.repository.view.Content;
@@ -38,6 +40,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ArrayListMultimap;
 import com.google.common.net.HttpHeaders;
 import org.apache.http.Header;
 import org.apache.http.HttpResponse;
@@ -54,6 +57,8 @@ import org.springframework.stereotype.Component;
 
 import static org.sonatype.nexus.content.huggingface.HuggingFaceContentFacet.API_KIND;
 import static org.sonatype.nexus.content.huggingface.HuggingFaceContentFacet.FILE_METADATA_KIND;
+import static org.sonatype.nexus.repository.huggingface.HuggingFaceErrors.X_ERROR_CODE;
+import static org.sonatype.nexus.repository.huggingface.HuggingFaceErrors.X_ERROR_MESSAGE;
 import static org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo.X_LINKED_ETAG;
 import static org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo.X_LINKED_SIZE;
 import static org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo.X_REPO_COMMIT;
@@ -81,6 +86,8 @@ public class HuggingFaceProxyFacet
   private static final Pattern NEXT_LINK_PATTERN = Pattern.compile("<([^>]+)>\\s*;\\s*rel=\"?next\"?");
 
   private static final String JSON_CONTENT_TYPE = "application/json";
+
+  private static final String REPO_NOT_FOUND = "RepoNotFound";
 
   private static final String META_PREFIX = "/.meta";
 
@@ -223,7 +230,7 @@ public class HuggingFaceProxyFacet
 
   @Override
   protected String getUrl(final Context context) {
-    return getEscapeHelper().uriSegments(target(context).remotePath().substring(1));
+    return HuggingFacePaths.encodeSlashedRevision(getEscapeHelper().uriSegments(target(context).remotePath().substring(1)));
   }
 
   @Nullable
@@ -276,16 +283,38 @@ public class HuggingFaceProxyFacet
   }
 
   /**
-   * The Hub answers 401 for repositories that do not exist or that the configured token cannot access; that is a
-   * missing resource rather than a failure of the remote.
+   * Hub client errors (missing repository, revision or file; gated repository) are passed on to the client, which
+   * turns them into specific exceptions.
    */
   @Override
-  protected void mayThrowProxyServiceException(final HttpResponse httpResponse) {
-    if (httpResponse.getStatusLine().getStatusCode() == HttpStatus.SC_UNAUTHORIZED) {
-      log.debug("Upstream answered 401 (missing, gated or private repository) in {}", getRepository().getName());
-      return;
+  protected Content build3xxResponseContent(
+      final Context context,
+      final URI uri,
+      final Content stale,
+      final HttpResponse response,
+      final CacheInfo cacheInfo,
+      final boolean isUnmodified) throws IOException
+  {
+    if (!isUnmodified && isHubClientError(response.getStatusLine().getStatusCode())) {
+      throw hubError(response);
     }
-    super.mayThrowProxyServiceException(httpResponse);
+    return super.build3xxResponseContent(context, uri, stale, response, cacheInfo, isUnmodified);
+  }
+
+  private static boolean isHubClientError(final int status) {
+    return status == HttpStatus.SC_NOT_FOUND || status == HttpStatus.SC_UNAUTHORIZED
+        || status == HttpStatus.SC_FORBIDDEN;
+  }
+
+  private static BypassHttpErrorException hubError(final HttpResponse response) {
+    int status = response.getStatusLine().getStatusCode();
+    String code = headerValue(response, X_ERROR_CODE);
+    if (code == null && status == HttpStatus.SC_UNAUTHORIZED) {
+      // what the Hub means by a bare 401; huggingface_hub only infers it for https endpoints
+      code = REPO_NOT_FOUND;
+    }
+    String reason = HuggingFaceErrors.encode(code, headerValue(response, X_ERROR_MESSAGE));
+    return new BypassHttpErrorException(status, reason, ArrayListMultimap.create());
   }
 
   // File metadata
@@ -336,10 +365,9 @@ public class HuggingFaceProxyFacet
           // redirect to the CDN: the X-Linked-* headers describe the file
           return fileMetadataContent(context, uri, commit, linkedEtag, linkedSize);
         }
-        if (status == HttpStatus.SC_NOT_FOUND || status == HttpStatus.SC_UNAUTHORIZED
-            || status == HttpStatus.SC_FORBIDDEN) {
+        if (isHubClientError(status)) {
           log.debug("Upstream answered {} for {}", status, uri);
-          return null;
+          throw hubError(response);
         }
         mayThrowProxyServiceException(response);
         log.warn("Unexpected upstream status {} for {}", status, uri);

@@ -26,6 +26,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import static java.util.Objects.requireNonNull;
+import static org.sonatype.nexus.repository.view.ContentTypes.APPLICATION_JSON;
 import static org.sonatype.nexus.repository.view.ContentTypes.APPLICATION_OCTET_STREAM;
 
 /**
@@ -35,6 +36,9 @@ import static org.sonatype.nexus.repository.view.ContentTypes.APPLICATION_OCTET_
  * cannot be detected from their content, which strict content type validation would reject. For such content there is
  * nothing to validate against, so it is accepted; any content whose type can be detected is still checked against its
  * file name, which catches e.g. an HTML error page served as {@code config.json}.
+ *
+ * Hub API responses have extension-less paths (e.g. {@code /api/models/owner/name/revision/main}); they are validated
+ * and typed as the JSON they are declared to be, rather than as the plain text detection would make of them.
  */
 @Component
 @Qualifier(HuggingFaceFormat.NAME)
@@ -65,9 +69,21 @@ public class HuggingFaceContentValidator
       @Nullable final String contentName,
       @Nullable final String declaredContentType) throws IOException
   {
-    boolean strict = strictContentTypeValidation && !isOpaque(contentSupplier, contentName);
+    String name = contentName;
+    if (name != null && APPLICATION_JSON.equals(declaredContentType) && !hasExtension(name)) {
+      // the query string of API paths would hide the extension from type detection
+      int query = name.indexOf('?');
+      name = (query < 0 ? name : name.substring(0, query)) + ".json";
+    }
+    boolean strict = strictContentTypeValidation && !isOpaque(contentSupplier, name);
     return defaultContentValidator.determineContentType(
-        strict, contentSupplier, mimeRulesSource, contentName, declaredContentType);
+        strict, contentSupplier, mimeRulesSource, name, declaredContentType);
+  }
+
+  private static boolean hasExtension(final String path) {
+    String baseName = path.substring(path.lastIndexOf('/') + 1);
+    int query = baseName.indexOf('?');
+    return (query < 0 ? baseName : baseName.substring(0, query)).contains(".");
   }
 
   private boolean isOpaque(final InputStreamSupplier contentSupplier, @Nullable final String contentName)

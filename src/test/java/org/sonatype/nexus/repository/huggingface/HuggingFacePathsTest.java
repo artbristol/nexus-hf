@@ -69,6 +69,30 @@ public class HuggingFacePathsTest
   }
 
   @Test
+  public void parsesSlashedRevisions() {
+    assertEquals(new FileRef(RepoType.MODEL, "openai-community/gpt2", "refs/pr/1", "config.json"),
+        HuggingFacePaths.parseFile("/openai-community/gpt2/resolve/refs/pr/1/config.json").orElseThrow());
+    assertEquals(new FileRef(RepoType.DATASET, "stanfordnlp/imdb", "refs/convert/parquet", "plain_text/x.parquet"),
+        HuggingFacePaths.parseFile("/datasets/stanfordnlp/imdb/resolve/refs/convert/parquet/plain_text/x.parquet")
+            .orElseThrow());
+    // a plain branch named like a directory is still a one-segment revision
+    assertEquals(new FileRef(RepoType.MODEL, "owner/name", "refs", "heads/x"),
+        HuggingFacePaths.parseFile("/owner/name/resolve/refs/heads/x").orElseThrow());
+  }
+
+  @Test
+  public void encodesSlashedRevisions() {
+    assertEquals("openai-community/gpt2/resolve/refs%2Fpr%2F1/config.json",
+        HuggingFacePaths.encodeSlashedRevision("openai-community/gpt2/resolve/refs/pr/1/config.json"));
+    assertEquals("api/models/openai-community/gpt2/revision/refs%2Fpr%2F1",
+        HuggingFacePaths.encodeSlashedRevision("api/models/openai-community/gpt2/revision/refs/pr/1"));
+    assertEquals("api/datasets/a/b/tree/refs%2Fconvert%2Fparquet/plain_text",
+        HuggingFacePaths.encodeSlashedRevision("api/datasets/a/b/tree/refs/convert/parquet/plain_text"));
+    assertEquals("owner/name/resolve/main/refs/pr/1",
+        HuggingFacePaths.encodeSlashedRevision("owner/name/resolve/main/refs/pr/1"));
+  }
+
+  @Test
   public void rejectsNonFilePaths() {
     assertFalse(HuggingFacePaths.parseFile("/openai-community/gpt2").isPresent());
     assertFalse(HuggingFacePaths.parseFile("/openai-community/gpt2/blob/main/config.json").isPresent());

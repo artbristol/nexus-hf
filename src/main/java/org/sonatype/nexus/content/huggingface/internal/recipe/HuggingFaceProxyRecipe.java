@@ -104,6 +104,8 @@ public class HuggingFaceProxyRecipe
 
   private final HuggingFaceHeadersHandler huggingFaceHeadersHandler;
 
+  private final HuggingFaceErrorHandler huggingFaceErrorHandler;
+
   private final LastDownloadedHandler lastDownloadedHandler;
 
   private final ProxyHandler proxyHandler;
@@ -133,6 +135,7 @@ public class HuggingFaceProxyRecipe
       final PartialFetchHandler partialFetchHandler,
       final ContentHeadersHandler contentHeadersHandler,
       final HuggingFaceHeadersHandler huggingFaceHeadersHandler,
+      final HuggingFaceErrorHandler huggingFaceErrorHandler,
       final LastDownloadedHandler lastDownloadedHandler,
       final ProxyHandler proxyHandler)
   {
@@ -157,6 +160,7 @@ public class HuggingFaceProxyRecipe
     this.partialFetchHandler = requireNonNull(partialFetchHandler);
     this.contentHeadersHandler = requireNonNull(contentHeadersHandler);
     this.huggingFaceHeadersHandler = requireNonNull(huggingFaceHeadersHandler);
+    this.huggingFaceErrorHandler = requireNonNull(huggingFaceErrorHandler);
     this.lastDownloadedHandler = requireNonNull(lastDownloadedHandler);
     this.proxyHandler = requireNonNull(proxyHandler);
   }
@@ -194,6 +198,7 @@ public class HuggingFaceProxyRecipe
         .handler(routingRuleHandler)
         .handler(exceptionHandler)
         .handler(handlerContributor)
+        .handler(huggingFaceErrorHandler)
         .handler(negativeCacheHandler)
         .handler(conditionalRequestHandler)
         .handler(partialFetchHandler)

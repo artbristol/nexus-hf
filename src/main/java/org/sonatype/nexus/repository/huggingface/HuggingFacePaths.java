@@ -24,9 +24,19 @@ import static java.util.Objects.requireNonNull;
 public final class HuggingFacePaths
 {
   /**
+   * Revisions that contain slashes. Clients send them encoded ({@code refs%2Fpr%2F1}), but the path seen by the
+   * repository is decoded.
+   */
+  private static final String SLASHED_REVISION = "refs/(?:pr|convert)/[^/]+";
+
+  /**
    * The repository id is matched lazily, so {@code owner/name} is only tried when {@code name/resolve} does not match.
    */
-  public static final String FILE_REGEX = "^/(?:(datasets|spaces)/)?([^/]+(?:/[^/]+)??)/resolve/([^/]+)/(.+)$";
+  public static final String FILE_REGEX =
+      "^/(?:(datasets|spaces)/)?([^/]+(?:/[^/]+)??)/resolve/(" + SLASHED_REVISION + "|[^/]+)/(.+)$";
+
+  private static final Pattern SLASHED_REVISION_PATTERN =
+      Pattern.compile("(/(?:resolve|revision|tree|paths-info|commits)/)refs/(pr|convert)/");
 
   /**
    * XET token endpoints are excluded: this proxy never offers the XET protocol.
@@ -141,6 +151,14 @@ public final class HuggingFacePaths
    */
   public static boolean isImmutableApi(final String path) {
     return IMMUTABLE_API_PATTERN.matcher(path).matches();
+  }
+
+  /**
+   * Re-encodes the slashes of a {@code refs/pr/N} or {@code refs/convert/X} revision in an (otherwise escaped) URL path,
+   * as the Hub expects them.
+   */
+  public static String encodeSlashedRevision(final String path) {
+    return SLASHED_REVISION_PATTERN.matcher(path).replaceFirst("$1refs%2F$2%2F");
   }
 
   public static boolean isCommitHash(final String revision) {
