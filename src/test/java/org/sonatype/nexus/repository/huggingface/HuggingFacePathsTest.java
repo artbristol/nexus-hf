@@ -128,13 +128,36 @@ public class HuggingFacePathsTest
   }
 
   @Test
+  public void kernelFiles() {
+    assertEquals(new FileRef(RepoType.KERNEL, "kernels-community/megablocks", "main", "build/x/__init__.py"),
+        HuggingFacePaths.parseFile("/kernels/kernels-community/megablocks/resolve/main/build/x/__init__.py")
+            .orElseThrow());
+  }
+
+  @Test
+  public void proxiesTheReadOnlyApiOnly() {
+    for (String path : new String[]{
+        "/api/models", "/api/datasets", "/api/kernels", "/api/kernels/kernels-community/megablocks",
+        "/api/kernels/kernels-community/megablocks/tree/main/build", "/api/organizations/openai/overview",
+        "/api/users/julien-c/overview"}) {
+      assertTrue(path, HuggingFacePaths.isApi(path));
+    }
+    for (String path : new String[]{
+        "/api/whoami-v2", "/api/settings/repositories", "/api/notifications", "/api/organizations/openai/members",
+        "/api/organizations/openai/settings/tokens", "/api/users/julien-c/billing/usage/live", "/api/jobs/openai",
+        "/api/kernels/kernels-community/megablocks/xet-read-token/main", "/api/models/a/b/xet-write-token/main",
+        "/api/buckets/a/b", "/api/modelsx", "/api/organizations/openai/overview/x"}) {
+      assertFalse(path, HuggingFacePaths.isApi(path));
+    }
+  }
+
+  @Test
   public void apiPaths() {
     assertTrue(HuggingFacePaths.isApi("/api/models/openai-community/gpt2/revision/main"));
     assertTrue(HuggingFacePaths.isApi("/api/datasets/stanfordnlp/imdb/tree/main/plain_text"));
     assertTrue(HuggingFacePaths.isApi("/api/models/gpt2"));
     assertFalse(HuggingFacePaths.isApi("/api/models/openai-community/gpt2/xet-read-token/" + SHA));
     assertFalse(HuggingFacePaths.isApi("/api/whoami-v2"));
-    assertFalse(HuggingFacePaths.isApi("/api/models"));
   }
 
   @Test

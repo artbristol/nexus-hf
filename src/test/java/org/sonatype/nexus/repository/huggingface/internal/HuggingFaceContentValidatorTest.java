@@ -44,14 +44,26 @@ public class HuggingFaceContentValidatorTest
   }
 
   /**
-   * The point of strict validation for a proxy: an upstream error page must not be cached as a model file.
+   * The point of strict validation for a proxy: an upstream error page must not be cached as an API response.
    */
   @Test
-  public void rejectsHtmlServedAsJson() {
+  public void rejectsHtmlServedAsApiResponse() {
     byte[] html = "<!DOCTYPE html><html><head><title>Error</title></head><body>Bad gateway</body></html>"
         .getBytes(StandardCharsets.UTF_8);
     assertThrows(InvalidContentException.class,
-        () -> determine("/owner/name/resolve/abc/config.json", html, "text/html"));
+        () -> determine("/api/models/owner/name/revision/main", html, "application/json"));
+  }
+
+  /**
+   * Repository files are whatever their authors uploaded, e.g. hf-internal-testing/fixtures_image_utils has a PNG
+   * called ai2d-demo.jpg. They are checked against the Hub's content hashes instead.
+   */
+  @Test
+  public void acceptsMislabelledRepositoryFiles() throws IOException {
+    byte[] png = concat(new byte[]{(byte) 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 13, 'I', 'H', 'D', 'R'},
+        random(64));
+    assertEquals("image/jpeg",
+        determine("/datasets/owner/name/resolve/abc/ai2d-demo.jpg", png, "image/jpeg"));
   }
 
   @Test

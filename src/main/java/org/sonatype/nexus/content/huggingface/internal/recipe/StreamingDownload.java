@@ -72,6 +72,10 @@ final class StreamingDownload
     return file;
   }
 
+  HuggingFaceFileInfo info() {
+    return info;
+  }
+
   @Nullable
   String contentType() {
     return contentType;

@@ -17,6 +17,7 @@ import org.sonatype.nexus.repository.Facet;
 import org.sonatype.nexus.repository.cache.CacheInfo;
 import org.sonatype.nexus.repository.content.Asset;
 import org.sonatype.nexus.repository.content.facet.ContentFacet;
+import org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo;
 import org.sonatype.nexus.repository.huggingface.HuggingFacePaths.FileRef;
 import org.sonatype.nexus.repository.view.Content;
 import org.sonatype.nexus.repository.view.Payload;
@@ -58,12 +59,13 @@ public interface HuggingFaceContentFacet
   Optional<Content> get(String path) throws IOException;
 
   /**
-   * Stores a repository file as an asset of the component for its repository and commit.
+   * Stores a repository file as an asset of the component for its repository and commit, after checking it against
+   * the Hub's content hash ({@link HuggingFaceFileInfo#isContentHash()}), when there is one.
    *
-   * @param file           the file, at a commit hash revision
-   * @param expectedSha256 SHA-256 the content must have, if known
+   * @param file the file, at a commit hash revision
+   * @throws org.sonatype.nexus.repository.InvalidContentException if the content does not match
    */
-  Content putFile(FileRef file, Payload content, @Nullable String expectedSha256) throws IOException;
+  Content putFile(FileRef file, Payload content, @Nullable HuggingFaceFileInfo info) throws IOException;
 
   /**
    * Stores a repository file from a local file, which may be hard-linked into the blob store.

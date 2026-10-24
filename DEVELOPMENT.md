@@ -53,8 +53,15 @@ plugin.
 | `GET  /{repo}/resolve/{rev}/{file}` | file bytes |
 | `GET  /api/{type}s/{repo}[/revision/{rev}]` | repo info (commit `sha`, file list) |
 | `GET  /api/{type}s/{repo}/tree/{rev}[/{path}]` | file listing, paginated with `Link: <...>; rel="next"` |
+| `GET  /api/{type}s?search=...` | listings and searches |
+| `GET  /api/{organizations,users}/{name}/overview` | publishers (checked by the `kernels` package) |
 
-`{repo}` is `name` or `owner/name`. Datasets and spaces are prefixed with `datasets/` and `spaces/`.
+`{repo}` is `name` or `owner/name`; `{type}` is `model`, `dataset`, `space` or `kernel`. File URLs of
+datasets, spaces and kernels are prefixed with `datasets/`, `spaces/` and `kernels/`.
+
+Nothing else under `/api/` is proxied (404): in particular nothing about the identity behind the
+repository's token (`whoami`, settings, billing, jobs, notifications, members, ...), which would
+otherwise be readable by anyone who can read the repository. See `HuggingFacePaths.API_REGEX`.
 
 ### Files
 
@@ -94,6 +101,14 @@ A client `HEAD` needs only step 1, so it never triggers a download of a multi-GB
 client's metadata timeout is 10 s). Responses carry `X-Repo-Commit`, `ETag`, `X-Linked-Etag`
 and `X-Linked-Size` built from the metadata.
 
+Files are stored under the repository's canonical name: the Hub redirects other spellings
+(`OpenAI-Community/GPT2`) and renamed repositories to it, and the proxy records where it was sent.
+
+Etags are content hashes, so content is stored once per Nexus repository: an index
+(`/.meta/content/<etag>.json`) maps etags to stored files, and a file that is identical in another
+commit (only the README changed) or another repository is served from the stored copy, without
+downloading or storing it again.
+
 When a branch or tag resolves to a commit, the file metadata is also stored for that commit:
 `snapshot_download` asks for every file by commit hash, which is then answered from the cache
 (also while the Hub is unreachable).
@@ -129,9 +144,13 @@ proxy.
 
 ## Content type validation
 
-Model weights (`.safetensors`, `.bin`, `.gguf`, ...) have no detectable content type, which strict
-content type validation rejects. `HuggingFaceContentValidator` accepts content whose type cannot be
-detected and still validates everything else against the file name.
+Strict content type validation compares the detected type of content with the type its name
+suggests, to keep e.g. an upstream error page from being cached. For repository files that check
+is both too weak and too strict: they are verified against the Hub's content hashes before being
+stored, and they are whatever their authors uploaded under whatever name (a PNG called `.jpg`, model
+weights of no detectable type), which strict validation would refuse to cache.
+`HuggingFaceContentValidator` therefore validates strictly only what the proxy produces itself: API
+responses and file metadata, typed as JSON.
 
 ## Components
 
@@ -186,7 +205,10 @@ nested directories) and spaces verified file by file against the Hub's hashes; a
 the Hub's without downloading; the Hub's own error types for missing repos, files and revisions
 and gated repos, also from the negative cache and without auto-blocking; conditional and range
 requests; paginated listings; storage shared between branch and commit; components; `HfFileSystem`;
-clients authenticating with credentials in the endpoint URL; and that nothing ever uses XET.
+clients authenticating with credentials in the endpoint URL; and that nothing ever uses XET; files
+unchanged between commits not downloaded again; mislabelled files cached; other spellings stored
+under the canonical name; kernel repositories, listings and publisher overviews; and identity
+endpoints not proxied.
 
 `test_faults.py` checks failure handling: dropped and stalled transfers resumed transparently;
 corrupt content never served complete nor cached; slow downloads streamed to concurrent clients

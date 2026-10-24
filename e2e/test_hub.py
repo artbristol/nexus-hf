@@ -14,7 +14,7 @@ from huggingface_hub import HfApi, HfFileSystem, get_hf_file_metadata, hf_hub_do
 from huggingface_hub.errors import (GatedRepoError, HfHubHTTPError, RemoteEntryNotFoundError, RepositoryNotFoundError,
                                     RevisionNotFoundError)
 
-from conftest import sha256, verify_against_hub
+from conftest import git_blob_id, sha256, verify_against_hub
 
 TINY = "hf-internal-testing/tiny-random-gpt2"  # 10 files, 13 MB
 TINY_COMMIT = "71034c5d8bde858ff824298bdedc65515b97d2b9"
@@ -218,3 +218,56 @@ def test_clients_can_authenticate_to_nexus_in_the_endpoint_url(repository, nexus
         assert os.path.getsize(path) > 0
     finally:
         nexus.anonymous_access(True)
+
+
+def test_unchanged_file_in_another_commit_is_not_downloaded_again(repository, relay, tmp_path):
+    # commits that only changed generation_config.json: pytorch_model.bin is the same in both
+    first, second = "846cc056cfd12b673fba447d93b06e9a60653eda", "a7121eefebf95db88463ff247b50b76f8cf109ec"
+    a = download(repository, tmp_path / "a", TINY, "pytorch_model.bin", revision=first)
+    mark = relay.mark()
+    b = download(repository, tmp_path / "b", TINY, "pytorch_model.bin", revision=second)
+    assert sha256(a) == sha256(b)
+    assert relay.since(mark, cdn=True) == [], "served from the copy stored for the first commit"
+    assert len([x for x in repository.file_assets() if x["path"].endswith("/pytorch_model.bin")]) == 1
+
+
+def test_mislabelled_file_is_served_and_cached(repository, relay, tmp_path):
+    # a PNG called .jpg: Hub files are verified by hash, not by type
+    name = "ai2d-demo.jpg"
+    path = download(repository, tmp_path, "hf-internal-testing/fixtures_image_utils", name, repo_type="dataset")
+    with open(path, "rb") as f:
+        assert f.read(4) == b"\x89PNG"
+    reference = hub(relay).get_paths_info("hf-internal-testing/fixtures_image_utils", [name], repo_type="dataset")[0]
+    assert sha256(path) == reference.lfs.sha256
+    assert [a for a in repository.file_assets() if a["path"].endswith("/" + name)], "cached despite its name"
+
+
+def test_other_spellings_are_stored_under_the_canonical_name(repository, tmp_path):
+    download(repository, tmp_path / "a", "OpenAI-Community/GPT2", "config.json")
+    download(repository, tmp_path / "b", "openai-community/gpt2", "config.json")
+    stored = [a["path"] for a in repository.file_assets() if a["path"].endswith("/config.json")]
+    assert len(stored) == 1 and stored[0].startswith("/openai-community/gpt2/resolve/")
+
+
+def test_kernel_repositories(repository, relay, tmp_path):
+    path = download(repository, tmp_path, "kernels-community/megablocks", "README.md", repo_type="kernel")
+    reference = hub(relay).get_paths_info("kernels-community/megablocks", ["README.md"], repo_type="kernel")[0]
+    assert git_blob_id(path) == reference.blob_id
+    assert proxied(repository).repo_info("kernels-community/megablocks", repo_type="kernel").sha
+
+
+def test_listings_and_publisher_overviews(repository, relay):
+    api = proxied(repository)
+    expected = [d.id for d in hub(relay).list_datasets(author="hf-internal-testing", limit=3)]
+    assert [d.id for d in api.list_datasets(author="hf-internal-testing", limit=3)] == expected
+    assert api.get_organization_overview("openai").name == "openai"
+    assert api.get_user_overview("julien-c").username == "julien-c"
+
+
+@pytest.mark.parametrize("path", ["api/whoami-v2", "api/settings/repositories", "api/notifications",
+                                  "api/organizations/openai/members", "api/jobs/openai"])
+def test_identity_endpoints_are_not_proxied(repository, relay, path):
+    """The repository's own Hub token must not be usable, or revealed, through the proxy."""
+    mark = relay.mark()
+    assert http(repository.url + "/" + path)[0] == 404
+    assert relay.since(mark) == []

@@ -48,6 +48,8 @@ public class HuggingFaceContentValidator
 
   private static final String API_PREFIX = "/api/";
 
+  private static final String META_PREFIX = "/.meta/";
+
   private final DefaultContentValidator defaultContentValidator;
 
   private final MimeSupport mimeSupport;
@@ -76,11 +78,20 @@ public class HuggingFaceContentValidator
       int query = name.indexOf('?');
       name = (query < 0 ? name : name.substring(0, query)) + ".json";
     }
-    boolean strict = strictContentTypeValidation && !isOpaque(contentSupplier, name);
+    boolean strict = strictContentTypeValidation && !isRepositoryFile(name) && !isOpaque(contentSupplier, name);
     return defaultContentValidator.determineContentType(
         strict, contentSupplier, mimeRulesSource, name, declaredContentType);
   }
 
+
+  /**
+   * Files from Hub repositories are checked against the Hub's content hashes before they are stored, which is what
+   * strict validation approximates by comparing type and name; and they are whatever their authors uploaded, under
+   * whatever name (a PNG called {@code .jpg} is common), which strict validation would refuse to cache.
+   */
+  private static boolean isRepositoryFile(@Nullable final String name) {
+    return name != null && !name.startsWith(API_PREFIX) && !name.startsWith(META_PREFIX) && name.contains("/resolve/");
+  }
 
   private boolean isOpaque(final InputStreamSupplier contentSupplier, @Nullable final String contentName)
       throws IOException

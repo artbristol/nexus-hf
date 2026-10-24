@@ -7,6 +7,11 @@
 package org.sonatype.nexus.content.huggingface.internal.recipe;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 import java.nio.file.Path;
 import java.util.Map;
 import java.util.Optional;
@@ -20,13 +25,13 @@ import org.sonatype.nexus.repository.content.facet.ContentFacetSupport;
 import org.sonatype.nexus.repository.content.fluent.FluentAsset;
 import org.sonatype.nexus.repository.content.fluent.FluentComponent;
 import org.sonatype.nexus.repository.content.store.FormatStoreManager;
+import org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo;
 import org.sonatype.nexus.repository.huggingface.HuggingFacePaths.FileRef;
 import org.sonatype.nexus.repository.huggingface.internal.HuggingFaceFormat;
 import org.sonatype.nexus.repository.view.Content;
 import org.sonatype.nexus.repository.view.Payload;
 import org.sonatype.nexus.repository.view.payloads.TempBlob;
 
-import com.google.common.hash.HashCode;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.config.ConfigurableBeanFactory;
@@ -63,18 +68,39 @@ public class HuggingFaceContentFacetImpl
   public Content putFile(
       final FileRef file,
       final Payload content,
-      @Nullable final String expectedSha256) throws IOException
+      @Nullable final HuggingFaceFileInfo info) throws IOException
   {
     checkArgument(file.isCommit(), "Files are stored at commit revisions: %s", file);
     try (TempBlob blob = blobs().ingest(content, HASHING)) {
-      if (expectedSha256 != null) {
-        HashCode actual = blob.getHashes().get(SHA256);
-        if (actual == null || !expectedSha256.equals(actual.toString())) {
+      if (info != null && info.isContentHash()) {
+        String actual = info.isSha256Etag() ? String.valueOf(blob.getHashes().get(SHA256)) : gitBlobId(blob);
+        if (!info.etag().equals(actual)) {
           throw new InvalidContentException(
-              "SHA-256 of " + file.path() + " is " + actual + ", upstream reported " + expectedSha256);
+              "Content hash of " + file.path() + " is " + actual + ", upstream reported " + info.etag());
         }
       }
       return saveFile(file, blob).markAsCached(content).download();
+    }
+  }
+
+  /**
+   * {@code sha1("blob <size>\0" + content)}: the Hub's etag for files not stored with LFS (which are small).
+   */
+  private static String gitBlobId(final TempBlob blob) throws IOException {
+    try {
+      MessageDigest sha1 = MessageDigest.getInstance("SHA-1");
+      sha1.update(("blob " + blob.getBlob().getMetrics().getContentSize() + "\0").getBytes(StandardCharsets.US_ASCII));
+      try (InputStream in = blob.get()) {
+        byte[] buffer = new byte[64 * 1024];
+        int n;
+        while ((n = in.read(buffer)) > 0) {
+          sha1.update(buffer, 0, n);
+        }
+      }
+      return HexFormat.of().formatHex(sha1.digest());
+    }
+    catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException(e);
     }
   }
 

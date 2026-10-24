@@ -16,8 +16,10 @@ import static java.util.Objects.requireNonNull;
  * Request paths of the Hugging Face Hub protocol, as used by {@code huggingface_hub}.
  *
  * <ul>
- * <li>{@code /[datasets/|spaces/]{repo}/resolve/{revision}/{file}} - a file at a revision</li>
- * <li>{@code /api/{models|datasets|spaces}/{repo}/...} - repository metadata</li>
+ * <li>{@code /[datasets/|spaces/|kernels/]{repo}/resolve/{revision}/{file}} - a file at a revision</li>
+ * <li>{@code /api/{models|datasets|spaces|kernels}/{repo}/...} - repository metadata</li>
+ * <li>{@code /api/{models|datasets|spaces|kernels}?...} - listings and searches</li>
+ * <li>{@code /api/{organizations|users}/{name}/overview} - publishers (e.g. checked by the {@code kernels} package)</li>
  * </ul>
  * where {@code {repo}} is {@code name} (legacy) or {@code owner/name}.
  */
@@ -35,22 +37,27 @@ public final class HuggingFacePaths
    * {@code resolve}.
    */
   public static final String FILE_REGEX =
-      "^/(?:(datasets|spaces)/)?([^/]+(?:/[^/]+)?)/resolve/(" + SLASHED_REVISION + "|[^/]+)/(.+)$";
+      "^/(?:(datasets|spaces|kernels)/)?([^/]+(?:/[^/]+)?)/resolve/(" + SLASHED_REVISION + "|[^/]+)/(.+)$";
 
   private static final Pattern SLASHED_REVISION_PATTERN =
       Pattern.compile("(/(?:resolve|revision|tree|paths-info|commits)/)refs/(pr|convert)/");
 
   /**
-   * XET token endpoints are excluded: this proxy never offers the XET protocol.
+   * The read-only Hub API that clients need to find and download repositories. Everything else stays unproxied, in
+   * particular anything about the identity behind the repository's token (whoami, settings, billing, jobs, ...), and
+   * XET token endpoints, as this proxy never offers the XET protocol.
    */
-  public static final String API_REGEX = "^/api/(?:models|datasets|spaces)/(?!.*/xet-[a-z]+-token(?:/|$)).+$";
+  public static final String API_REGEX = "^/api/(?:"
+      + "(?:models|datasets|spaces|kernels)(?:/(?!.*/xet-[a-z]+-token(?:/|$)).+)?"
+      + "|(?:organizations|users)/[^/]+/overview"
+      + ")$";
 
   private static final Pattern FILE_PATTERN = Pattern.compile(FILE_REGEX);
 
   private static final Pattern COMMIT_PATTERN = Pattern.compile("^[0-9a-f]{40}$");
 
   private static final Pattern IMMUTABLE_API_PATTERN =
-      Pattern.compile("^/api/(?:models|datasets|spaces)/.+/(?:revision|tree)/[0-9a-f]{40}(?:/.*)?$");
+      Pattern.compile("^/api/(?:models|datasets|spaces|kernels)/.+/(?:revision|tree)/[0-9a-f]{40}(?:/.*)?$");
 
   private HuggingFacePaths() {
   }
@@ -59,7 +66,8 @@ public final class HuggingFacePaths
   {
     MODEL("model", ""),
     DATASET("dataset", "datasets/"),
-    SPACE("space", "spaces/");
+    SPACE("space", "spaces/"),
+    KERNEL("kernel", "kernels/");
 
     private final String kind;
 
@@ -88,7 +96,11 @@ public final class HuggingFacePaths
       if (segment == null) {
         return MODEL;
       }
-      return "datasets".equals(segment) ? DATASET : SPACE;
+      return switch (segment) {
+        case "datasets" -> DATASET;
+        case "spaces" -> SPACE;
+        default -> KERNEL;
+      };
     }
   }
 
@@ -102,6 +114,13 @@ public final class HuggingFacePaths
       requireNonNull(repoId);
       requireNonNull(revision);
       requireNonNull(file);
+    }
+
+    /**
+     * The same file in a repository of another name.
+     */
+    public FileRef withRepoId(final String otherRepoId) {
+      return new FileRef(type, otherRepoId, revision, file);
     }
 
     /**

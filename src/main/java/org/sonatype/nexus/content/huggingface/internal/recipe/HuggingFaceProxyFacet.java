@@ -12,6 +12,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.nio.file.Files;
 import java.util.Iterator;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
@@ -208,15 +209,22 @@ public class HuggingFaceProxyFacet
     // read by store() to verify the content
     context.getAttributes().set(HuggingFaceFileInfo.class, info);
     if (!file.isCommit()) {
-      rememberForCommit(file.at(info.commit()), info);
+      rememberForCommit((info.repoId() != null ? file.withRepoId(info.repoId()) : file).at(info.commit()), info);
     }
 
     if (HttpMethods.HEAD.equals(context.getRequest().getAction())) {
       return withFileInfo(new Content(new HeadPayload(info.size())), info);
     }
 
-    FileRef pinned = file.at(info.commit());
+    // stored under the repository's canonical name, however it was asked for
+    FileRef pinned = (info.repoId() != null ? file.withRepoId(info.repoId()) : file).at(info.commit());
     setTarget(context, Target.fileContent(pinned));
+    if (info.isContentHash() && getCachedContent(context) == null) {
+      Content same = storedContent(info);
+      if (same != null) {
+        return withFileInfo(same, info);
+      }
+    }
     if (info.size() != null && getCachedContent(context) == null) {
       Content streamed = streamFile(context, pinned, info);
       if (streamed != null) {
@@ -391,6 +399,7 @@ public class HuggingFaceProxyFacet
       download.download(upstreamBody(client, request.getURI(), response), MAX_RESUMES);
       complete = true;
       content().putFile(file, download.file(), download.contentType(), cacheInfo);
+      rememberContent(download.info(), file);
       log.debug("Downloaded and stored {} in {}", file.path(), getRepository().getName());
     }
     catch (Exception e) {
@@ -458,6 +467,45 @@ public class HuggingFaceProxyFacet
    * commit hash (as {@code snapshot_download} does for every file) an upstream request, and lets them be served while
    * the Hub is unreachable.
    */
+  /**
+   * Content already stored under another commit or repository: the Hub's etags are content hashes, so a file that
+   * did not change between commits, or is shared between repositories, is served from the one stored copy instead of
+   * being downloaded and stored again.
+   */
+  @Nullable
+  private Content storedContent(final HuggingFaceFileInfo info) throws IOException {
+    Optional<Content> entry = content().get(contentIndexPath(info.etag()));
+    if (entry.isEmpty()) {
+      return null;
+    }
+    String path;
+    try (InputStream in = entry.get().openInputStream()) {
+      path = objectMapper.readTree(in).path("path").asText(null);
+    }
+    Content stored = path == null ? null : content().get(path).orElse(null);
+    if (stored == null || (info.size() != null && stored.getSize() != info.size())) {
+      return null; // deleted since, or not what the index promised
+    }
+    log.debug("Serving {} from {}", info.etag(), path);
+    return stored;
+  }
+
+  /**
+   * Records where the content with this etag is stored, see {@link #storedContent}.
+   */
+  private void rememberContent(final HuggingFaceFileInfo info, final FileRef pinned) throws IOException {
+    if (info.isContentHash()) {
+      byte[] json = objectMapper.writeValueAsBytes(Map.of("path", pinned.path()));
+      Content entry = new Content(new BytesPayload(json, JSON_CONTENT_TYPE));
+      entry.getAttributes().set(CacheInfo.class, cacheControllerHolder.getContentCacheController().current());
+      content().putMetadata(contentIndexPath(info.etag()), FILE_METADATA_KIND, entry);
+    }
+  }
+
+  private static String contentIndexPath(final String etag) {
+    return META_PREFIX + "/content/" + etag + META_SUFFIX;
+  }
+
   private void rememberForCommit(final FileRef pinned, final HuggingFaceFileInfo info) throws IOException {
     String path = Target.fileMetadata(pinned).assetPath();
     if (content().get(path).isEmpty()) {
@@ -510,20 +558,20 @@ public class HuggingFaceProxyFacet
   protected Content store(final Context context, final Content content) throws IOException {
     Target target = target(context);
     return switch (target.kind()) {
-      case FILE_CONTENT -> content().putFile(target.file(), content, expectedSha256(context));
+      case FILE_CONTENT -> storeFile(context, target.file(), content);
       case FILE_METADATA -> content().putMetadata(target.assetPath(), FILE_METADATA_KIND, content);
       case API -> withNextPage(content().putApiResponse(
           target.assetPath(), content, content.getAttributes().get(NEXT_PAGE, String.class)));
     };
   }
 
-  /**
-   * For LFS files the Hub etag is the SHA-256 of the content, which lets us verify what the CDN served.
-   */
-  @Nullable
-  private static String expectedSha256(final Context context) {
+  private Content storeFile(final Context context, final FileRef file, final Content content) throws IOException {
     HuggingFaceFileInfo info = context.getAttributes().get(HuggingFaceFileInfo.class);
-    return info != null && info.isSha256Etag() ? info.etag() : null;
+    Content stored = content().putFile(file, content, info);
+    if (info != null) {
+      rememberContent(info, file);
+    }
+    return stored;
   }
 
   @Override
@@ -640,6 +688,7 @@ public class HuggingFaceProxyFacet
     String commit = null;
     String linkedEtag = null;
     Long linkedSize = null;
+    String repoId = null;
     for (int hop = 0; hop <= MAX_HUB_REDIRECTS; hop++) {
       HttpHead head = new HttpHead(uri);
       head.setConfig(requestConfig);
@@ -661,17 +710,19 @@ public class HuggingFaceProxyFacet
         if (status == HttpStatus.SC_OK) {
           return fileMetadataContent(context, uri, commit,
               linkedEtag != null ? linkedEtag : normalizeEtag(headerValue(response, HttpHeaders.ETAG)),
-              linkedSize != null ? linkedSize : parseSize(headerValue(response, HttpHeaders.CONTENT_LENGTH)));
+              linkedSize != null ? linkedSize : parseSize(headerValue(response, HttpHeaders.CONTENT_LENGTH)), repoId);
         }
         if (isRedirect(status)) {
           String location = headerValue(response, HttpHeaders.LOCATION);
           URI next = location == null ? null : uri.resolve(location);
           if (next != null && Objects.equals(next.getHost(), uri.getHost())) {
+            // the Hub redirects renamed repositories, and other spellings of a name, to the canonical one
+            repoId = canonicalRepoId(next, repoId);
             uri = next;
             continue;
           }
           // redirect to the CDN: the X-Linked-* headers describe the file
-          return fileMetadataContent(context, uri, commit, linkedEtag, linkedSize);
+          return fileMetadataContent(context, uri, commit, linkedEtag, linkedSize, repoId);
         }
         if (isHubClientError(status)) {
           log.debug("Upstream answered {} for {}", status, uri);
@@ -693,17 +744,33 @@ public class HuggingFaceProxyFacet
       final URI uri,
       @Nullable final String commit,
       @Nullable final String etag,
-      @Nullable final Long size) throws IOException
+      @Nullable final Long size,
+      @Nullable final String repoId) throws IOException
   {
     if (commit == null) {
       // a failure of the remote, not a missing file: answered with 502 and not negatively cached
       throw new IOException(
           "Upstream response for " + uri + " has no " + X_REPO_COMMIT + " header; is the remote URL a Hugging Face Hub?");
     }
-    HuggingFaceFileInfo info = new HuggingFaceFileInfo(commit, etag, size);
+    HuggingFaceFileInfo info = new HuggingFaceFileInfo(commit, etag, size, repoId);
     Content content = new Content(new BytesPayload(objectMapper.writeValueAsBytes(info), JSON_CONTENT_TYPE));
     content.getAttributes().set(CacheInfo.class, getCacheController(context).current());
     return content;
+  }
+
+  /**
+   * The repository id in a redirect target, if it is the resolve URL of a file (as opposed to e.g. resolve-cache).
+   */
+  @Nullable
+  private String canonicalRepoId(final URI target, @Nullable final String current) {
+    String remotePath = getRemoteUrl().getPath();
+    String path = target.getPath();
+    if (path == null || !path.startsWith(remotePath)) {
+      return current;
+    }
+    return HuggingFacePaths.parseFile("/" + path.substring(remotePath.length()))
+        .map(FileRef::repoId)
+        .orElse(current);
   }
 
   private static RequestConfig withoutRedirects(final HttpClient client) {
