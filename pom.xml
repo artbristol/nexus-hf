@@ -17,14 +17,49 @@
 
   <modelVersion>4.0.0</modelVersion>
 
+  <!--
+    The Nexus version this plugin is built against, and the only one it should be installed into: it uses Nexus
+    internals, which change between releases. Resolved from Maven Central.
+  -->
   <parent>
     <groupId>org.sonatype.nexus.common.components</groupId>
     <artifactId>nexus-common-components-formats-parent</artifactId>
     <version>3.97.2-02</version>
+    <relativePath/>
   </parent>
 
+  <groupId>io.github.artbristol</groupId>
   <artifactId>nexus-repository-huggingface</artifactId>
-  <name>${project.groupId}:${project.artifactId}</name>
+  <version>0.1.0</version>
+  <name>Hugging Face proxy for Nexus Repository Core</name>
+  <url>https://github.com/artbristol/nexus-hf</url>
+
+  <licenses>
+    <license>
+      <name>Eclipse Public License 1.0</name>
+      <url>https://www.eclipse.org/legal/epl-v10.html</url>
+    </license>
+  </licenses>
+
+  <build>
+    <plugins>
+      <!--
+        The inherited githook-checks profile points core.hooksPath of the enclosing git repository at Nexus' own
+        hooks; that is meant for the nexus-public tree only.
+      -->
+      <plugin>
+        <groupId>com.rudikershaw.gitbuildhook</groupId>
+        <artifactId>git-build-hook-maven-plugin</artifactId>
+        <version>3.5.0</version>
+        <executions>
+          <execution>
+            <id>default</id>
+            <phase>none</phase>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 
   <dependencies>
     <dependency>
