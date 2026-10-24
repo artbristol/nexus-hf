@@ -1,0 +1,5 @@
+huggingface_hub
+pytest
+# optional, for test_libraries.py
+transformers
+datasets

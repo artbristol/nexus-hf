@@ -65,9 +65,17 @@ export HF_ENDPOINT=http://localhost:8081/repository/hf-proxy
 hf download openai-community/gpt2
 ```
 
-Clients authenticate to Nexus, not to Hugging Face: allow anonymous read access to the
-repository, or give clients Nexus credentials. Clients do not need a Hugging Face token; the
-repository uses its own.
+Clients authenticate to Nexus, not to Hugging Face. Either allow anonymous read access to the
+repository, or put Nexus credentials into the endpoint URL:
+
+```sh
+export HF_ENDPOINT=http://user:password@localhost:8081/repository/hf-proxy
+```
+
+Clients do not need a Hugging Face token; the repository uses its own.
+
+Besides `hf` and `huggingface_hub`, this works for libraries built on them, such as
+`transformers` and `datasets`.
 
 Large files start downloading immediately, even when Nexus has not cached them yet, and work
 with the default client settings.
