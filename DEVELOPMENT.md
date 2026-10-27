@@ -267,12 +267,15 @@ CI (`.github/workflows/build.yml`) only provisions a machine and runs Maven: eve
 runs the same from a laptop.
 
 To release: set `<version>` in `pom.xml`, update the compatibility table in the README, commit and
-push. Then either run the workflow (*Actions → build → Run workflow*), or run, at that commit:
+push. Then either run the workflow (*Actions → build → Run workflow*), which builds and tests, then
+releases the jar it tested; or, from a laptop with the GitHub CLI (`gh`) logged in, at that commit:
 
 ```sh
-JRELEASER_GITHUB_TOKEN=... mvn -Prelease deploy
+mvn -Pgithub-release deploy      # build, run all tests, release
 ```
 
-Both build and run all tests, then create the tag `v<version>` and a GitHub release with the jar
-(JReleaser, configured in the `release` profile; notes in `src/release/notes.md`). The tag is made
-from the version, so the two cannot disagree. `-Djreleaser.dry.run=true` shows what would be done.
+Releasing creates the tag `v<version>` at the commit built, and a GitHub release with the jar and
+`src/release/notes.md`; the tag is made from the version, so the two cannot disagree.
+`mvn -Pgithub-release initialize exec:exec@github-release` releases a jar already built in `target/`,
+and `-Drelease.gh=echo` shows the command instead of running it. (The profile is not called
+`release`: the Nexus parent POM has one of that name.)

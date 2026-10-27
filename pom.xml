@@ -189,62 +189,45 @@
 
   <profiles>
     <!--
-      `mvn -Prelease deploy`: builds, runs all tests, then creates the GitHub release v<version> (and its tag, at the
-      current commit, which must be pushed) with the jar. Needs a GitHub token in JRELEASER_GITHUB_TOKEN.
+      `mvn -Pgithub-release deploy`: builds, runs all tests, then creates the GitHub release v<version>, and its tag at the
+      commit built (which must be pushed), with the jar. With a jar already built and tested in target/,
+      `mvn -Pgithub-release initialize exec:exec@github-release` just releases it. Uses the GitHub CLI, gh, logged in or with a
+      token in GH_TOKEN; -Drelease.gh=echo shows the command instead.
     -->
     <profile>
-      <id>release</id>
+      <id>github-release</id>
       <properties>
         <!-- nothing goes to a Maven repository -->
         <maven.deploy.skip>true</maven.deploy.skip>
+        <release.gh>gh</release.gh>
       </properties>
       <build>
         <plugins>
           <plugin>
-            <groupId>org.jreleaser</groupId>
-            <artifactId>jreleaser-maven-plugin</artifactId>
-            <version>1.26.0</version>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>exec-maven-plugin</artifactId>
             <executions>
               <execution>
                 <id>github-release</id>
                 <phase>deploy</phase>
                 <goals>
-                  <goal>release</goal>
+                  <goal>exec</goal>
                 </goals>
+                <configuration>
+                  <skip>false</skip>
+                  <executable>${release.gh}</executable>
+                  <arguments>
+                    <argument>release</argument>
+                    <argument>create</argument>
+                    <argument>v${project.version}</argument>
+                    <argument>${project.build.directory}/${project.build.finalName}.jar</argument>
+                    <argument>--target=${build.revision}</argument>
+                    <argument>--title=v${project.version} for Nexus Repository Core ${nexus.version}</argument>
+                    <argument>--notes-file=src/release/notes.md</argument>
+                  </arguments>
+                </configuration>
               </execution>
             </executions>
-            <configuration>
-              <jreleaser>
-                <project>
-                  <description>${project.name}</description>
-                  <license>EPL-1.0</license>
-                  <authors>
-                    <author>Art O Cathain</author>
-                  </authors>
-                  <links>
-                    <homepage>${project.url}</homepage>
-                  </links>
-                </project>
-                <release>
-                  <github>
-                    <owner>artbristol</owner>
-                    <name>nexus-hf</name>
-                    <tagName>v{{projectVersion}}</tagName>
-                    <releaseName>v{{projectVersion}} for Nexus Repository Core ${nexus.version}</releaseName>
-                    <changelog>
-                      <external>${project.basedir}/src/release/notes.md</external>
-                    </changelog>
-                  </github>
-                </release>
-                <files>
-                  <artifacts>
-                    <artifact>
-                      <path>${project.build.directory}/${project.build.finalName}.jar</path>
-                    </artifact>
-                  </artifacts>
-                </files>
-              </jreleaser>
-            </configuration>
           </plugin>
         </plugins>
       </build>
