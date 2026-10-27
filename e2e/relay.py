@@ -9,7 +9,9 @@ its manners and its evidence:
   or if the Hub answers 429;
 * every request is identified with a User-Agent pointing at this project;
 * every request is recorded, so tests can assert e.g. that a file was fetched from the CDN once;
-* faults can be injected into chosen responses (corrupt or truncated bodies, stalls, errors).
+* faults can be injected into chosen responses (corrupt or truncated bodies, stalls, errors);
+* whether a request carried an Authorization header is recorded (never its value), and a marker
+  token standing in for a Hub token is removed before forwarding.
 
 Redirects to the CDN, pagination links, and the XET storage URLs (in token responses and file
 reconstructions) are rewritten to go through the relay as well.
@@ -27,6 +29,8 @@ from typing import Callable, List, Optional
 
 UPSTREAM = "https://huggingface.co"
 USER_AGENT = "nexus-hf-e2e (+https://github.com/artbristol/nexus-hf)"
+# a Hub token for tests about where tokens go; the Hub would reject it, so it never gets there
+MARKER_TOKEN = "hf_e2e_marker_token_not_valid"
 CDN_PREFIX = "/__cdn/"
 HOP_BY_HOP = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade",
               "proxy-authenticate", "proxy-authorization"}
@@ -63,6 +67,7 @@ class Request:
     path: str        # path and query on the Hub, or of the CDN URL
     cdn: bool
     status: int = 0
+    auth: bool = False  # sent with an Authorization header
 
 
 def _carries_xet_urls(request: Request, response) -> bool:
@@ -107,6 +112,12 @@ class Relay:
                     and (method is None or r.method == method))
 
         rule = Rule(matches, fault, times)
+        with self._lock:
+            self._rules.append(rule)
+        return rule
+
+    def add_rule(self, rule: Rule):
+        """For faults with conditions `inject` cannot express. `rule.matches` runs under the relay's lock."""
         with self._lock:
             self._rules.append(rule)
         return rule
@@ -185,7 +196,8 @@ class Relay:
                 cdn = self.path.startswith(CDN_PREFIX)
                 target = urllib.parse.unquote(self.path[len(CDN_PREFIX):]) if cdn else UPSTREAM + self.path
                 parsed = urllib.parse.urlsplit(target)
-                request = Request(self.command, parsed.path + ("?" + parsed.query if parsed.query else ""), cdn)
+                request = Request(self.command, parsed.path + ("?" + parsed.query if parsed.query else ""), cdn,
+                                  auth=self.headers.get("Authorization") is not None)
                 body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
                 try:
                     relay._account(request)
@@ -202,6 +214,8 @@ class Relay:
                 headers = {k: v for k, v in self.headers.items()
                            if k.lower() not in HOP_BY_HOP and k.lower() not in ("host", "content-length")}
                 headers["User-Agent"] = (headers.get("User-Agent", "") + " " + USER_AGENT).strip()
+                headers = {k: v for k, v in headers.items()
+                           if not (k.lower() == "authorization" and v == "Bearer " + MARKER_TOKEN)}
                 if cdn or "/xet-read-token/" in request.path:
                     # XET JSON is rewritten, so it must arrive uncompressed
                     headers = {k: v for k, v in headers.items() if k.lower() != "accept-encoding"}

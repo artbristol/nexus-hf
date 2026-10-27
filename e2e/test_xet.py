@@ -13,49 +13,16 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 
 import pytest
 from huggingface_hub import HfApi, get_hf_file_metadata, hf_hub_download, hf_hub_url, snapshot_download
 
-from conftest import sha256
-from relay import Fault
+from conftest import XET_REALM, sha256
+from relay import Fault, Rule
 
 TINY = "hf-internal-testing/tiny-random-gpt2"
 TINY_COMMIT = "71034c5d8bde858ff824298bdedc65515b97d2b9"
 XET_FILES = ["model.safetensors", "pytorch_model.bin"]  # both XET files, in one xorb
-XET_REALM = "HuggingFaceXetToken"
-
-
-@pytest.fixture(scope="module")
-def xet_realm(nexus):
-    original = nexus.active_realms()
-    if XET_REALM not in original:
-        nexus.set_active_realms(original + [XET_REALM])
-    yield
-    nexus.set_active_realms(original)
-
-
-class Reader:
-    """A user who may only read the repository, and the endpoint with their credentials in it."""
-
-    def __init__(self, repository, user, password):
-        self.user = user
-        self.password = password
-        scheme, rest = repository.url.split("://", 1)
-        self.endpoint = "%s://%s:%s@%s" % (scheme, user, password, rest)
-        self.basic = "Basic " + base64.b64encode(("%s:%s" % (user, password)).encode()).decode()
-
-
-@pytest.fixture
-def reader(nexus, repository, xet_realm):
-    user = "e2e-reader-" + uuid.uuid4().hex[:8]
-    password = uuid.uuid4().hex
-    nexus.create_reader(user, password, repository.name)
-    yield Reader(repository, user, password)
-    nexus.delete_reader(user)
-
-
 def hub_sha256(relay, filename):
     info = HfApi(endpoint=relay.base_url.rstrip("/"), token=False).get_paths_info(
         TINY, [filename], revision=TINY_COMMIT)[0]
@@ -99,6 +66,8 @@ def test_xet_download_matches_the_hub_and_is_then_served_from_cache(repository, 
     assert [r for r in xet_storage_requests(requests) if r.path.startswith("/xorbs/")]
     cdn = [r for r in requests if r.cdn]
     assert cdn == xet_storage_requests(cdn), "XET files are not downloaded over plain HTTP"
+    reconstructions = [r for r in xet_storage_requests(requests) if "/reconstructions/" in r.path]
+    assert len(reconstructions) == len(XET_FILES), "one reconstruction per file from XET storage"
     paths = [a["path"] for a in repository.assets()]
     assert [p for p in paths if p.startswith("/.xet/xorbs/")]
     assert [p for p in paths if p.startswith("/.xet/reconstructions/")]
@@ -192,9 +161,65 @@ def test_dropped_xorb_transfer_is_retried(repository, relay, reader, tmp_path):
 
 
 @pytest.mark.repo(xet=True)
-def test_refused_presigned_url_is_retried(repository, relay, reader, tmp_path):
-    rule = relay.inject(Fault(status=403), cdn=True, path=r"^/xorbs/")
+def test_refused_presigned_url_is_replaced(repository, relay, reader, tmp_path):
+    """An expired presigned URL keeps being refused; the client must get a new one, from a new reconstruction."""
+    refused_at = []
+
+    def until_reconstructed_again(request):
+        if not (request.cdn and request.path.startswith("/xorbs/")):
+            return False
+        if not refused_at:
+            refused_at.append(len(relay.requests))
+            return True
+        return not [r for r in relay.requests[refused_at[0]:] if r.cdn and "/reconstructions/" in r.path]
+
+    rule = relay.add_rule(Rule(until_reconstructed_again, Fault(status=403), times=20))
     path = hf_hub_download(TINY, "model.safetensors", revision=TINY_COMMIT, endpoint=reader.endpoint,
                            cache_dir=tmp_path, token=False)
     assert sha256(path) == hub_sha256(relay, "model.safetensors")
-    assert rule.times == 0, "the fault was injected"
+    assert refused_at, "the fault was injected"
+    assert rule.times > 0, "the refused URL was replaced, not retried until the fault ran out"
+
+
+@pytest.mark.repo(xet=True)
+def test_xorb_url_tokens_are_valid_for_their_range_only(repository, reader):
+    """The tokens in xorb URLs end up in request logs; they must not open anything but that range."""
+    status, headers, _ = http(repository.url + "/api/models/%s/xet-read-token/%s" % (TINY, TINY_COMMIT),
+                              {"Authorization": reader.basic})
+    reconstruction = headers["X-Xet-Cas-Url"] + "/v2/reconstructions/" + get_hf_file_metadata(
+        hf_hub_url(TINY, "model.safetensors", endpoint=reader.endpoint), token=False).xet_file_data.file_hash
+    plan = json.loads(http(reconstruction, {"Authorization": "Bearer " + headers["X-Xet-Access-Token"]})[2])
+    url = next(iter(plan["xorbs"].values()))[0]["url"]
+    path, query = url.split("?", 1)
+    url_token = urllib.parse.parse_qs(query)["token"][0]
+
+    assert http(url)[0] == 200
+    assert http(reconstruction, {"Authorization": "Bearer " + url_token})[0] == 401
+    xorb, _ = path.rsplit("/", 1)
+    assert http(xorb + "/0-99?token=" + url_token)[0] == 403
+
+
+@pytest.mark.repo(xet=True)
+def test_blocked_remote_fetches_nothing_from_xet_storage(nexus, repository, relay, reader, tmp_path):
+    cached = hf_hub_download(TINY, "model.safetensors", revision=TINY_COMMIT, endpoint=reader.endpoint,
+                             cache_dir=tmp_path / "before", token=False)
+    # the metadata of another XET file is cached too, so that only its XET data is missing
+    get_hf_file_metadata(hf_hub_url(TINY, "pytorch_model.bin", revision=TINY_COMMIT, endpoint=reader.endpoint),
+                         token=False)
+    nexus.update_proxy(repository.name, relay.base_url, blocked=True, xet=True)
+    mark = relay.mark()
+    # Nexus blocks the first host it contacts after the change, normally the Hub (so here too)
+    with pytest.raises(Exception):
+        get_hf_file_metadata(hf_hub_url(TINY, "vocab.json", revision=TINY_COMMIT, endpoint=reader.endpoint),
+                             token=False)
+    again = hf_hub_download(TINY, "model.safetensors", revision=TINY_COMMIT, endpoint=reader.endpoint,
+                            cache_dir=tmp_path / "after", token=False)
+    assert sha256(again) == sha256(cached), "cached XET data is still served"
+    # asked for directly: the client would retry for minutes
+    _, headers, _ = http(repository.url + "/api/models/%s/xet-read-token/%s" % (TINY, TINY_COMMIT),
+                         {"Authorization": reader.basic})
+    file_hash = get_hf_file_metadata(hf_hub_url(TINY, "pytorch_model.bin", revision=TINY_COMMIT,
+                                                endpoint=reader.endpoint), token=False).xet_file_data.file_hash
+    assert http(headers["X-Xet-Cas-Url"] + "/v2/reconstructions/" + file_hash,
+                {"Authorization": "Bearer " + headers["X-Xet-Access-Token"]})[0] == 503
+    assert relay.since(mark) == [], "a blocked remote is not contacted, XET storage included"

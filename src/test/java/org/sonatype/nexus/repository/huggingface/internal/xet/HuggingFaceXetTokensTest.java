@@ -75,6 +75,17 @@ public class HuggingFaceXetTokensTest
   }
 
   @Test
+  public void rangeTokensNameTheirRangeAndLastFromTheirIssue() {
+    Claims storage = tokens.claims("hf-proxy", REPO, "alice", "NexusAuthenticatingRealm");
+    Claims range = at(NOW.plusSeconds(600), KEY).forPath(storage, "/.xet/xorbs/x/0-1");
+    assertTrue(storage.isStorageToken());
+    assertFalse(range.isStorageToken());
+    assertEquals(Optional.of(range), tokens.verify(tokens.issue(range)));
+    assertEquals("/.xet/xorbs/x/0-1", range.path());
+    assertEquals(storage.expires() + 600, range.expires());
+  }
+
+  @Test
   public void rejectsGarbage() {
     for (String garbage : new String[]{null, "", "hfxet1.", "hfxet1..", "hfxet1.e30.", "Bearer x", "hf_abc",
         "hfxet1.%%%.%%%"}) {

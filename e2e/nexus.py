@@ -30,11 +30,13 @@ class Nexus:
             raise AssertionError("%s %s -> %d %s" % (method, path, e.code, e.read()[:300])) from None
 
     def create_proxy(self, name, remote_url, metadata_max_age=1440, auto_block=False, timeout=None, blocked=False,
-                     xet=False):
+                     xet=False, bearer_token=None):
         http_client = {"blocked": blocked, "autoBlock": auto_block}
         if timeout is not None:
             # retries: 0 so that a failure costs the Hub one request, not several
             http_client["connection"] = {"timeout": timeout, "retries": 0}
+        if bearer_token is not None:
+            http_client["authentication"] = {"type": "bearerToken", "bearerToken": bearer_token}
         self.call("POST", "/service/rest/v1/repositories/huggingface/proxy", self._proxy_body(
             name, remote_url, metadata_max_age, http_client, xet))
 

@@ -11,6 +11,7 @@ installed, and access to huggingface.co. Configuration, from the environment:
 See DEVELOPMENT.md.
 """
 
+import base64
 import hashlib
 import os
 import uuid
@@ -100,6 +101,38 @@ def repository(nexus, relay, relay_allowed, anonymous_access, request):
     except AssertionError as e:
         if " 404 " not in str(e):  # deleted by the test
             raise
+
+
+XET_REALM = "HuggingFaceXetToken"
+
+
+@pytest.fixture(scope="module")
+def xet_realm(nexus):
+    original = nexus.active_realms()
+    if XET_REALM not in original:
+        nexus.set_active_realms(original + [XET_REALM])
+    yield
+    nexus.set_active_realms(original)
+
+
+class Reader:
+    """A user who may only read the repository, and the endpoint with their credentials in it."""
+
+    def __init__(self, repository, user, password):
+        self.user = user
+        self.password = password
+        scheme, rest = repository.url.split("://", 1)
+        self.endpoint = "%s://%s:%s@%s" % (scheme, user, password, rest)
+        self.basic = "Basic " + base64.b64encode(("%s:%s" % (user, password)).encode()).decode()
+
+
+@pytest.fixture
+def reader(nexus, repository, xet_realm):
+    user = "e2e-reader-" + uuid.uuid4().hex[:8]
+    password = uuid.uuid4().hex
+    nexus.create_reader(user, password, repository.name)
+    yield Reader(repository, user, password)
+    nexus.delete_reader(user)
 
 
 def pytest_configure(config):

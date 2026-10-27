@@ -39,6 +39,7 @@ import org.sonatype.nexus.repository.http.HttpResponses;
 import org.sonatype.nexus.repository.http.HttpStatus;
 import org.sonatype.nexus.repository.httpclient.HttpClientFacet;
 import org.sonatype.nexus.repository.httpclient.RemoteBlockedIOException;
+import org.sonatype.nexus.repository.httpclient.RemoteConnectionStatusType;
 import org.sonatype.nexus.repository.huggingface.HuggingFaceErrors;
 import org.sonatype.nexus.repository.huggingface.HuggingFacePaths;
 import org.sonatype.nexus.repository.huggingface.HuggingFacePaths.Reconstruction;
@@ -184,6 +185,12 @@ public class HuggingFaceXetFacet
       .build();
 
   /**
+   * Reconstruction requests in progress, by file hash.
+   */
+  private final ConcurrentMap<String, CompletableFuture<XetReconstruction>> reconstructionFetches =
+      new ConcurrentHashMap<>();
+
+  /**
    * Upstream requests in progress, by presigned URL.
    */
   private final ConcurrentMap<String, CompletableFuture<Void>> downloads = new ConcurrentHashMap<>();
@@ -289,7 +296,7 @@ public class HuggingFaceXetFacet
    * window needs xorb ranges that are neither cached nor have a presigned URL that is still valid.
    */
   public Response reconstruction(final Context context, final Reconstruction request) throws IOException {
-    Optional<Claims> claims = verifiedToken(bearerToken(context));
+    Optional<Claims> claims = verifiedToken(bearerToken(context)).filter(Claims::isStorageToken);
     if (claims.isEmpty()) {
       return HttpResponses.unauthorized("Invalid or expired XET token");
     }
@@ -306,11 +313,11 @@ public class HuggingFaceXetFacet
       XetReconstruction whole = storedReconstruction(request.fileHash());
       boolean fresh = whole == null;
       if (fresh) {
-        whole = fetchReconstruction(claims.get().repo(), request.fileHash());
+        whole = fetchReconstructionOnce(claims.get().repo(), request.fileHash());
       }
       slice = whole.slice(window[0], window[1]);
       if (slice.isPresent() && !fresh && !available(slice.get())) {
-        whole = fetchReconstruction(claims.get().repo(), request.fileHash());
+        whole = fetchReconstructionOnce(claims.get().repo(), request.fileHash());
         slice = whole.slice(window[0], window[1]);
       }
       size = whole.size();
@@ -318,15 +325,21 @@ public class HuggingFaceXetFacet
     catch (UpstreamStatusException e) {
       return e.response;
     }
+    catch (RemoteBlockedIOException e) {
+      return HttpResponses.serviceUnavailable(e.getMessage());
+    }
     if (slice.isEmpty()) {
       // how the client learns that it has reached the end of the file
       return HttpResponses.rangeNotSatisfiable(size);
     }
-    String token = URLEncoder.encode(tokens.issue(tokens.claims(claims.get().repository(), claims.get().repo(),
-        claims.get().userId(), claims.get().realm())), StandardCharsets.UTF_8);
     String base = getRepository().getUrl();
-    ObjectNode body = slice.get().toJson(request.version(), (hash, part) -> base + xorbRange(hash, part).path() + "?"
-        + HuggingFaceXetTokenExtractor.TOKEN_PARAMETER + "=" + token);
+    ObjectNode body = slice.get().toJson(request.version(), (hash, part) -> {
+      String path = xorbRange(hash, part).path();
+      // each URL has a token for its range only, as these end up in request logs
+      String token = tokens.issue(tokens.forPath(claims.get(), path));
+      return base + path + "?" + HuggingFaceXetTokenExtractor.TOKEN_PARAMETER + "="
+          + URLEncoder.encode(token, StandardCharsets.UTF_8);
+    });
     return HttpResponses.ok(new BytesPayload(objectMapper.writeValueAsBytes(body), JSON_CONTENT_TYPE));
   }
 
@@ -386,10 +399,35 @@ public class HuggingFaceXetFacet
   }
 
   /**
+   * Fetches the reconstruction of a whole file, or waits for the request already doing so: clients ask for several
+   * windows of a file at once.
+   */
+  private XetReconstruction fetchReconstructionOnce(final RepoRef repo, final String fileHash) throws IOException {
+    CompletableFuture<XetReconstruction> mine = new CompletableFuture<>();
+    CompletableFuture<XetReconstruction> existing = reconstructionFetches.putIfAbsent(fileHash, mine);
+    if (existing != null) {
+      return join(existing);
+    }
+    try {
+      XetReconstruction reconstruction = fetchReconstruction(repo, fileHash);
+      mine.complete(reconstruction);
+      return reconstruction;
+    }
+    catch (IOException | RuntimeException e) {
+      mine.completeExceptionally(e);
+      throw e;
+    }
+    finally {
+      reconstructionFetches.remove(fileHash, mine);
+    }
+  }
+
+  /**
    * Fetches the reconstruction of a whole file from XET storage (version 2 of the API, else version 1, as clients
    * do), stores it, and remembers its presigned URLs.
    */
   private XetReconstruction fetchReconstruction(final RepoRef repo, final String fileHash) throws IOException {
+    checkNotBlocked();
     JsonNode body = null;
     boolean v2 = true;
     boolean renewed = false;
@@ -450,7 +488,10 @@ public class HuggingFaceXetFacet
    */
   public Response xorb(final Context context, final XorbRange range) throws IOException {
     Parameters parameters = context.getRequest().getParameters();
-    if (verifiedToken(parameters.get(HuggingFaceXetTokenExtractor.TOKEN_PARAMETER)).isEmpty()) {
+    if (verifiedToken(parameters.get(HuggingFaceXetTokenExtractor.TOKEN_PARAMETER))
+        .filter(claims -> range.path().equals(claims.path()))
+        .isEmpty())
+    {
       return HttpResponses.forbidden("Invalid or expired XET token");
     }
     if (!globallyEnabled || !enabled) {
@@ -470,6 +511,9 @@ public class HuggingFaceXetFacet
     catch (UpstreamStatusException e) {
       return e.response;
     }
+    catch (RemoteBlockedIOException e) {
+      return HttpResponses.serviceUnavailable(e.getMessage());
+    }
     catch (IOException e) {
       log.warn("Fetching {} into {} failed: {}", range.path(), getRepository().getName(), e.toString());
       return HttpResponses.badGateway();
@@ -486,17 +530,8 @@ public class HuggingFaceXetFacet
     CompletableFuture<Void> mine = new CompletableFuture<>();
     CompletableFuture<Void> existing = downloads.putIfAbsent(fetch.url(), mine);
     if (existing != null) {
-      try {
-        existing.get();
-        return;
-      }
-      catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        throw new IOException("Interrupted while waiting for upstream", e);
-      }
-      catch (ExecutionException e) {
-        throw e.getCause() instanceof IOException io ? io : new IOException(e.getCause());
-      }
+      join(existing);
+      return;
     }
     try {
       doDownload(fetch);
@@ -512,6 +547,7 @@ public class HuggingFaceXetFacet
   }
 
   private void doDownload(final Fetch fetch) throws IOException {
+    checkNotBlocked();
     URI uri = URI.create(fetch.url());
     validateRemoteHost(uri);
     HttpGet get = new HttpGet(uri);
@@ -524,7 +560,10 @@ public class HuggingFaceXetFacet
     try {
       int status = response.getStatusLine().getStatusCode();
       if (status == HttpStatus.FORBIDDEN) {
-        // expired: the client fetches the reconstruction again, with new URLs
+        // expired: forgotten, so that the client, which fetches the reconstruction again, gets new URLs
+        for (Part part : fetch.parts()) {
+          fetches.invalidate(xorbRange(fetch.xorbHash(), part));
+        }
         throw new UpstreamStatusException(HttpResponses.forbidden("Presigned URL refused upstream"));
       }
       if (status != HttpStatus.PARTIAL_CONTENT) {
@@ -659,6 +698,16 @@ public class HuggingFaceXetFacet
     return builder.build();
   }
 
+  /**
+   * Blocking applies to XET storage too. (The HTTP client only applies it to the first host it contacts, the Hub.)
+   */
+  private void checkNotBlocked() throws RemoteBlockedIOException {
+    RemoteConnectionStatusType status = facet(HttpClientFacet.class).getStatus().getType();
+    if (status == RemoteConnectionStatusType.BLOCKED || status == RemoteConnectionStatusType.AUTO_BLOCKED_UNAVAILABLE) {
+      throw new RemoteBlockedIOException("Remote blocked: " + status.getDescription());
+    }
+  }
+
   private void validateRemoteHost(final URI uri) throws RemoteBlockedIOException {
     if (uri.getHost() == null) {
       throw new RemoteBlockedIOException("No host in " + uri);
@@ -684,6 +733,22 @@ public class HuggingFaceXetFacet
   private static String bearerToken(final Context context) {
     String header = context.getRequest().getHeaders().get(HttpHeaders.AUTHORIZATION);
     return header != null && header.startsWith("Bearer ") ? header.substring("Bearer ".length()).trim() : null;
+  }
+
+  /**
+   * The result of an upstream request made by another request, with its failure.
+   */
+  private static <T> T join(final CompletableFuture<T> future) throws IOException {
+    try {
+      return future.get();
+    }
+    catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IOException("Interrupted while waiting for upstream", e);
+    }
+    catch (ExecutionException e) {
+      throw e.getCause() instanceof IOException io ? io : new IOException(e.getCause());
+    }
   }
 
   private static XorbRange xorbRange(final String hash, final Part part) {

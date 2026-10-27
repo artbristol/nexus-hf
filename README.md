@@ -75,9 +75,9 @@ To enable it:
    in the REST API request above. It is off unless enabled.
 
 XET is offered only to authenticated users (credentials in the endpoint URL, see below); anonymous
-clients download over HTTP. The tokens appear in the URLs of XET storage requests, so in Nexus'
-request log; they expire after an hour and are valid only for XET storage requests to that one
-repository. Setting `nexus.format.huggingface.xet.enabled=false` in `etc/nexus.properties` turns XET
+clients download over HTTP. The URLs of XET storage requests contain tokens, so these appear in
+Nexus' request log; each is valid for an hour, and only for the one piece of a file its URL names.
+Blocking the repository's remote blocks XET storage too. Setting `nexus.format.huggingface.xet.enabled=false` in `etc/nexus.properties` turns XET
 off for all repositories.
 
 ## Using
@@ -109,7 +109,6 @@ with the default client settings.
 
 * Proxy repositories only: no hosted or group repositories, no uploads.
 * XET downloads need an authenticated user and the XET token realm; other clients use plain HTTP.
-* Access to gated or private models with a token has not been tested yet.
 
 ## License
 

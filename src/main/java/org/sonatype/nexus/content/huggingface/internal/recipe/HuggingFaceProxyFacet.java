@@ -353,14 +353,19 @@ public class HuggingFaceProxyFacet
       throw e;
     }
     CacheInfo cacheInfo = getCacheController(context).current();
-    downloadExecutor.execute(() -> runDownload(file, download, client, request, response, cacheInfo, slot));
+    downloadExecutor.execute(() -> runDownload(context, file, download, client, request, response, cacheInfo, slot));
     return download;
   }
 
   /**
    * The upstream body of a file: the response already received, then, to resume, ranged requests for the rest.
    */
-  private StreamingDownload.Upstream upstreamBody(final HttpClient client, final URI uri, final HttpResponse first) {
+  private StreamingDownload.Upstream upstreamBody(
+      final Context context,
+      final HttpClient client,
+      final URI uri,
+      final HttpResponse first)
+  {
     AtomicBoolean firstUsed = new AtomicBoolean();
     return offset -> {
       if (!firstUsed.getAndSet(true)) {
@@ -371,7 +376,7 @@ public class HuggingFaceProxyFacet
       if (offset > 0) {
         resume.setHeader(HttpHeaders.RANGE, "bytes=" + offset + "-");
       }
-      HttpResponse response = client.execute(resume);
+      HttpResponse response = execute(context, client, resume);
       int status = response.getStatusLine().getStatusCode();
       if (status == HttpStatus.SC_PARTIAL_CONTENT) {
         return response.getEntity().getContent();
@@ -388,6 +393,7 @@ public class HuggingFaceProxyFacet
   }
 
   private void runDownload(
+      final Context context,
       final FileRef file,
       final StreamingDownload download,
       final HttpClient client,
@@ -398,7 +404,7 @@ public class HuggingFaceProxyFacet
   {
     boolean complete = false;
     try {
-      download.download(upstreamBody(client, request.getURI(), response), MAX_RESUMES);
+      download.download(upstreamBody(context, client, request.getURI(), response), MAX_RESUMES);
       complete = true;
       content().putFile(file, download.file(), download.contentType(), cacheInfo);
       rememberContent(download.info(), file);
@@ -779,6 +785,66 @@ public class HuggingFaceProxyFacet
     return HuggingFacePaths.parseFile("/" + path.substring(remotePath.length()))
         .map(FileRef::repoId)
         .orElse(current);
+  }
+
+  /**
+   * Sends the repository's Hub token, if it has one, with requests to the Hub, and only there: Nexus does not send it
+   * by itself, and it must not follow a redirect to the CDN (whose presigned URLs refuse a second credential, and
+   * which has no business seeing it). So redirects of requests to the Hub are followed here, keeping the token within
+   * the Hub, unless the caller follows them itself.
+   */
+  @Override
+  protected HttpResponse execute(final Context context, final HttpClient client, final HttpRequestBase request)
+      throws IOException
+  {
+    String token = facet(HttpClientFacet.class).getBearerToken();
+    if (token == null || !isRemoteHost(request.getURI())) {
+      return super.execute(context, client, request);
+    }
+    request.setHeader(HttpHeaders.AUTHORIZATION, "Bearer " + token);
+    RequestConfig config = request.getConfig() != null ? request.getConfig() : withoutRedirects(client);
+    if (request.getConfig() != null && !request.getConfig().isRedirectsEnabled()) {
+      return super.execute(context, client, request);
+    }
+    HttpRequestBase current = request;
+    current.setConfig(RequestConfig.copy(config).setRedirectsEnabled(false).build());
+    for (int hop = 0; hop <= MAX_HUB_REDIRECTS; hop++) {
+      HttpResponse response = super.execute(context, client, current);
+      String location = headerValue(response, HttpHeaders.LOCATION);
+      if (!isRedirect(response.getStatusLine().getStatusCode()) || location == null) {
+        return response;
+      }
+      HttpClientUtils.closeQuietly(response);
+      URI next = current.getURI().resolve(location);
+      HttpRequestBase redirected = sameMethod(current, next);
+      redirected.setHeaders(current.getAllHeaders());
+      if (!isRemoteHost(next)) {
+        // to the CDN: without the token, and the CDN's own redirects followed as usual
+        redirected.removeHeaders(HttpHeaders.AUTHORIZATION);
+        redirected.setConfig(RequestConfig.copy(config).setRedirectsEnabled(true).build());
+        return super.execute(context, client, redirected);
+      }
+      redirected.setConfig(current.getConfig());
+      current = redirected;
+    }
+    throw new IOException("Too many redirects requesting " + request.getURI());
+  }
+
+  private boolean isRemoteHost(final URI uri) {
+    URI remote = getRemoteUrl();
+    return uri.getHost() != null && uri.getHost().equalsIgnoreCase(remote.getHost()) && port(uri) == port(remote);
+  }
+
+  private static int port(final URI uri) {
+    return uri.getPort() != -1 ? uri.getPort() : "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
+  }
+
+  private static HttpRequestBase sameMethod(final HttpRequestBase request, final URI uri) throws IOException {
+    return switch (request.getMethod()) {
+      case HttpMethods.GET -> new HttpGet(uri);
+      case HttpMethods.HEAD -> new HttpHead(uri);
+      default -> throw new IOException("Cannot follow a redirect of " + request.getMethod() + " " + request.getURI());
+    };
   }
 
   private static RequestConfig withoutRedirects(final HttpClient client) {

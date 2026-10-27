@@ -1,0 +1,6 @@
+huggingface_hub
+pytest
+# optional, for test_libraries.py; the lower bound stops pip from quietly falling back to an
+# ancient release when the newest does not fit the installed huggingface_hub
+transformers>=5
+datasets

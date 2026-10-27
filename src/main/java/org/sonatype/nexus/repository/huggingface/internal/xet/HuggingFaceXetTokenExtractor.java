@@ -8,11 +8,14 @@ package org.sonatype.nexus.repository.huggingface.internal.xet;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import javax.annotation.Nullable;
 
+import org.sonatype.nexus.repository.huggingface.HuggingFacePaths;
+import org.sonatype.nexus.repository.huggingface.internal.xet.HuggingFaceXetTokens.Claims;
 import org.sonatype.nexus.security.authc.apikey.ApiKeyExtractor;
 import org.sonatype.nexus.security.realm.RealmManager;
 
@@ -26,9 +29,10 @@ import static com.google.common.net.HttpHeaders.AUTHORIZATION;
 import static java.util.Objects.requireNonNull;
 
 /**
- * Finds the XET tokens of {@link HuggingFaceXetTokenRealm} in requests: as bearer token in XET storage requests, and
- * as {@code token} query parameter of the xorb URLs this repository hands out. Only in requests to the XET storage
- * endpoints of the repository a token was issued for, and only while the realm is active.
+ * Finds the XET tokens of {@link HuggingFaceXetTokenRealm} in requests: storage tokens as bearer token of
+ * reconstruction requests, and xorb range tokens as {@code token} query parameter of the xorb URLs this repository
+ * hands out, each for its own range only. Only in requests to the repository a token was issued for, and only while
+ * the realm is active; anything else is not a login attempt.
  */
 @Component
 @Qualifier(HuggingFaceXetTokenRealm.NAME)
@@ -40,9 +44,10 @@ public class HuggingFaceXetTokenExtractor
   private static final String BEARER = "Bearer ";
 
   /**
-   * {@code /repository/<name>/.xet/...}, as the servlet sees it (still URL-encoded).
+   * {@code /repository/<name>/.xet/...}, as the servlet sees it (still URL-encoded): the repository name and the path
+   * within the repository.
    */
-  private static final Pattern XET_REQUEST = Pattern.compile("^/repository/([^/]+)/\\.xet/.+$");
+  private static final Pattern XET_REQUEST = Pattern.compile("^/repository/([^/]+)(/\\.xet/.+)$");
 
   private final HuggingFaceXetTokens tokens;
 
@@ -69,17 +74,20 @@ public class HuggingFaceXetTokenExtractor
     if (!matcher.matches()) {
       return null;
     }
-    String token = bearerToken(request);
-    if (token == null) {
-      token = request.getParameter(TOKEN_PARAMETER);
-    }
+    String repositoryPath = URLDecoder.decode(matcher.group(2), StandardCharsets.UTF_8);
+    boolean reconstruction = HuggingFacePaths.parseXetReconstruction(repositoryPath).isPresent();
+    boolean xorb = HuggingFacePaths.parseXetXorb(repositoryPath).isPresent();
+    String token = reconstruction ? bearerToken(request) : xorb ? request.getParameter(TOKEN_PARAMETER) : null;
     if (token == null || !token.startsWith(HuggingFaceXetTokens.PREFIX)
         || !realmManager.get().isRealmEnabled(HuggingFaceXetTokenRealm.NAME)) {
       return null;
     }
     String repository = URLDecoder.decode(matcher.group(1), StandardCharsets.UTF_8);
-    // a token is for one repository only; a token of another one is not a login attempt and fails as anonymous
-    return tokens.verify(token).filter(claims -> claims.repository().equals(repository)).isPresent() ? token : null;
+    Optional<Claims> claims = tokens.verify(token)
+        .filter(c -> c.repository().equals(repository))
+        .filter(c -> reconstruction ? c.isStorageToken() : repositoryPath.equals(c.path()));
+    // a token that is not valid here is not a login attempt: the request goes on as anonymous, and fails as such
+    return claims.isPresent() ? token : null;
   }
 
   @Nullable

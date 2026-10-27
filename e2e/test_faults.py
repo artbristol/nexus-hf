@@ -102,7 +102,9 @@ def test_slow_upstream_is_streamed_to_concurrent_clients_from_one_download(repos
     for first_byte, total, body in results:
         assert hashlib.sha256(body).hexdigest() == weights_sha256
         assert total > 3, "the throttle applied"
-        assert first_byte < 2.5, "bytes flow before the download has finished"
+        # not an absolute bound, which would depend on the Hub's latency: without streaming, the first byte would
+        # come when the whole file has been downloaded, at the end
+        assert total - first_byte > 1.5, "bytes flow before the download has finished"
     assert len(relay.since(mark, cdn=True, path=CDN_WEIGHTS)) == 1, "one upstream download for all clients"
 
 

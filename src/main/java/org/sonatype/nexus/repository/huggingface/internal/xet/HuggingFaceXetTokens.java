@@ -36,6 +36,9 @@ import static java.util.Objects.requireNonNull;
  * scoped to one repository, and the proxy needs one of those to talk to XET storage), and the Nexus user it was issued
  * to, whom it authenticates (see {@link HuggingFaceXetTokenRealm}). It is signed with a key that lives as long as this
  * Nexus process: tokens are short-lived, and clients fetch new ones when theirs expire.
+ *
+ * Storage tokens, which clients send as bearer tokens, are for reconstruction requests. The tokens in the xorb URLs of
+ * a reconstruction, which end up in request logs, are each for that one xorb range ({@link Claims#path}).
  */
 @Component
 public class HuggingFaceXetTokens
@@ -78,6 +81,7 @@ public class HuggingFaceXetTokens
    * @param repository name of the Nexus repository it is valid for
    * @param userId     Nexus user it authenticates
    * @param realm      realm of that user (e.g. {@code NexusAuthenticatingRealm}, {@code LdapRealm})
+   * @param path       the one xorb range path it is for, or {@code null} for a storage token
    * @param expires    end of validity, in seconds since the epoch
    */
   @JsonIgnoreProperties(ignoreUnknown = true)
@@ -88,6 +92,7 @@ public class HuggingFaceXetTokens
       String revision,
       String userId,
       String realm,
+      @Nullable String path,
       long expires)
   {
     public Claims {
@@ -102,13 +107,29 @@ public class HuggingFaceXetTokens
     public RepoRef repo() {
       return new RepoRef(type, repoId, revision);
     }
+
+    /**
+     * Whether this is a storage token, not a token for one xorb range.
+     */
+    public boolean isStorageToken() {
+      return path == null;
+    }
   }
 
   /**
-   * A token for the given user, valid from now on for {@link #LIFETIME_SECONDS}.
+   * A storage token for the given user, valid from now on for {@link #LIFETIME_SECONDS}.
    */
   public Claims claims(final String repository, final RepoRef repo, final String userId, final String realm) {
-    return new Claims(repository, repo.type(), repo.repoId(), repo.revision(), userId, realm,
+    return new Claims(repository, repo.type(), repo.repoId(), repo.revision(), userId, realm, null,
+        clock.instant().getEpochSecond() + LIFETIME_SECONDS);
+  }
+
+  /**
+   * A token of the same user for one xorb range only, valid from now on for {@link #LIFETIME_SECONDS}.
+   */
+  public Claims forPath(final Claims storageToken, final String path) {
+    return new Claims(storageToken.repository(), storageToken.type(), storageToken.repoId(), storageToken.revision(),
+        storageToken.userId(), storageToken.realm(), requireNonNull(path),
         clock.instant().getEpochSecond() + LIFETIME_SECONDS);
   }
 
