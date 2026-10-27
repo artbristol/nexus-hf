@@ -79,6 +79,7 @@ import static org.sonatype.nexus.repository.huggingface.HuggingFaceErrors.X_ERRO
 import static org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo.X_LINKED_ETAG;
 import static org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo.X_LINKED_SIZE;
 import static org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo.X_REPO_COMMIT;
+import static org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo.X_XET_HASH;
 
 /**
  * Hugging Face proxy facet.
@@ -86,8 +87,8 @@ import static org.sonatype.nexus.repository.huggingface.HuggingFaceFileInfo.X_RE
  * A file request is served in two steps, each going through the regular proxy machinery (cache, cooperation,
  * staleness): first the file metadata is resolved with an upstream {@code HEAD} that does not follow the CDN redirect,
  * then the content is fetched from, and stored at, the commit-pinned path. A client {@code HEAD} only needs the first
- * step. Hub API responses are proxied with their XET hints removed, so clients keep downloading through this
- * repository instead of going to XET storage directly.
+ * step. Hub API responses are stored as they are, and served without their XET hints unless XET is offered (see
+ * {@link HuggingFaceXetFacet}), so that clients that cannot use XET through this repository download over HTTP.
  */
 @Component
 @Scope(ConfigurableBeanFactory.SCOPE_PROTOTYPE)
@@ -193,7 +194,8 @@ public class HuggingFaceProxyFacet
     }
     if (HuggingFacePaths.isApi(path)) {
       setTarget(context, Target.api(path, rawQuery(context)));
-      return super.get(context);
+      Content content = super.get(context);
+      return content == null || facet(HuggingFaceXetFacet.class).isOffered() ? content : withoutXetHashes(content);
     }
     return null;
   }
@@ -688,6 +690,7 @@ public class HuggingFaceProxyFacet
     String commit = null;
     String linkedEtag = null;
     Long linkedSize = null;
+    String xetHash = null;
     String repoId = null;
     for (int hop = 0; hop <= MAX_HUB_REDIRECTS; hop++) {
       HttpHead head = new HttpHead(uri);
@@ -706,11 +709,15 @@ public class HuggingFaceProxyFacet
         if (linkedSize == null) {
           linkedSize = parseSize(headerValue(response, X_LINKED_SIZE));
         }
+        if (xetHash == null) {
+          xetHash = parseXetHash(headerValue(response, X_XET_HASH));
+        }
 
         if (status == HttpStatus.SC_OK) {
           return fileMetadataContent(context, uri, commit,
               linkedEtag != null ? linkedEtag : normalizeEtag(headerValue(response, HttpHeaders.ETAG)),
-              linkedSize != null ? linkedSize : parseSize(headerValue(response, HttpHeaders.CONTENT_LENGTH)), repoId);
+              linkedSize != null ? linkedSize : parseSize(headerValue(response, HttpHeaders.CONTENT_LENGTH)), repoId,
+              xetHash);
         }
         if (isRedirect(status)) {
           String location = headerValue(response, HttpHeaders.LOCATION);
@@ -722,7 +729,7 @@ public class HuggingFaceProxyFacet
             continue;
           }
           // redirect to the CDN: the X-Linked-* headers describe the file
-          return fileMetadataContent(context, uri, commit, linkedEtag, linkedSize, repoId);
+          return fileMetadataContent(context, uri, commit, linkedEtag, linkedSize, repoId, xetHash);
         }
         if (isHubClientError(status)) {
           log.debug("Upstream answered {} for {}", status, uri);
@@ -745,14 +752,15 @@ public class HuggingFaceProxyFacet
       @Nullable final String commit,
       @Nullable final String etag,
       @Nullable final Long size,
-      @Nullable final String repoId) throws IOException
+      @Nullable final String repoId,
+      @Nullable final String xetHash) throws IOException
   {
     if (commit == null) {
       // a failure of the remote, not a missing file: answered with 502 and not negatively cached
       throw new IOException(
           "Upstream response for " + uri + " has no " + X_REPO_COMMIT + " header; is the remote URL a Hugging Face Hub?");
     }
-    HuggingFaceFileInfo info = new HuggingFaceFileInfo(commit, etag, size, repoId);
+    HuggingFaceFileInfo info = new HuggingFaceFileInfo(commit, etag, size, repoId, xetHash);
     Content content = new Content(new BytesPayload(objectMapper.writeValueAsBytes(info), JSON_CONTENT_TYPE));
     content.getAttributes().set(CacheInfo.class, getCacheController(context).current());
     return content;
@@ -787,7 +795,7 @@ public class HuggingFaceProxyFacet
   // API
 
   /**
-   * Fetches one API response, without its XET hints. For one page of a paginated listing, the link to the next page is
+   * Fetches one API response. For one page of a paginated listing, the link to the next page is
    * kept (relative to the remote, so it can be served pointing at this repository) and stored with the response.
    */
   @Nullable
@@ -803,7 +811,6 @@ public class HuggingFaceProxyFacet
     finally {
       upstream.close();
     }
-    stripXetHashes(body);
 
     Content content = new Content(new BytesPayload(objectMapper.writeValueAsBytes(body), JSON_CONTENT_TYPE));
     content.getAttributes().set(Content.CONTENT_ETAG, upstream.getAttributes().get(Content.CONTENT_ETAG));
@@ -847,14 +854,34 @@ public class HuggingFaceProxyFacet
     return null;
   }
 
+  /**
+   * An API response without its XET hints: given an {@code xetHash}, {@code snapshot_download} skips the file metadata
+   * request and goes to XET storage directly.
+   */
+  private Content withoutXetHashes(final Content content) throws IOException {
+    JsonNode body;
+    try (InputStream in = content.openInputStream()) {
+      body = objectMapper.readTree(in);
+    }
+    if (!stripXetHashes(body)) {
+      return content;
+    }
+    return new Content(content, new BytesPayload(objectMapper.writeValueAsBytes(body), JSON_CONTENT_TYPE));
+  }
+
+  /**
+   * @return whether there were any
+   */
   @VisibleForTesting
-  static void stripXetHashes(final JsonNode node) {
+  static boolean stripXetHashes(final JsonNode node) {
+    boolean stripped = false;
     if (node instanceof ObjectNode object) {
-      object.remove(XET_HASH_FIELD);
+      stripped = object.remove(XET_HASH_FIELD) != null;
     }
     for (Iterator<JsonNode> children = node.elements(); children.hasNext(); ) {
-      stripXetHashes(children.next());
+      stripped |= stripXetHashes(children.next());
     }
+    return stripped;
   }
 
   // helpers
@@ -898,6 +925,11 @@ public class HuggingFaceProxyFacet
     }
     String value = etag.startsWith("W/") ? etag.substring(2) : etag;
     return value.replace("\"", "");
+  }
+
+  @Nullable
+  private static String parseXetHash(@Nullable final String value) {
+    return value != null && value.matches("^[0-9a-f]{64}$") ? value : null;
   }
 
   @Nullable

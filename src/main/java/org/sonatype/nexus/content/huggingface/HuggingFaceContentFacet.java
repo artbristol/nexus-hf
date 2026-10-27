@@ -52,6 +52,11 @@ public interface HuggingFaceContentFacet
    */
   String API_KIND = "api";
 
+  /**
+   * Asset kind of cached XET storage data: xorb ranges and file reconstructions.
+   */
+  String XET_KIND = "xet";
+
   String HUGGINGFACE_ATTRIBUTES = "huggingface";
 
   String NEXT_PAGE_ATTRIBUTE = "nextPage";
@@ -73,6 +78,11 @@ public interface HuggingFaceContentFacet
    * @param file the file, at a commit hash revision
    */
   Content putFile(FileRef file, Path path, @Nullable String contentType, CacheInfo cacheInfo) throws IOException;
+
+  /**
+   * Stores XET storage data from a local file, as a component-less asset.
+   */
+  Content putXetData(String path, Path file, String contentType) throws IOException;
 
   /**
    * Stores a component-less asset.

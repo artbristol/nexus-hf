@@ -260,7 +260,13 @@ public class StreamingDownloadTest
   public void readerWaitingForTheFirstByteFailsWhenUpstreamFails() throws Exception {
     byte[] content = randomBytes(1000);
     StreamingDownload download = new StreamingDownload(file, lfsInfo(content), null);
-    Future<byte[]> reader = executor.submit(() -> readAll(download));
+    // opened before the download fails, as by a request that arrived first
+    InputStream opened = download.openReader();
+    Future<byte[]> reader = executor.submit(() -> {
+      try (InputStream in = opened) {
+        return in.readAllBytes();
+      }
+    });
     InputStream broken = new InputStream()
     {
       @Override

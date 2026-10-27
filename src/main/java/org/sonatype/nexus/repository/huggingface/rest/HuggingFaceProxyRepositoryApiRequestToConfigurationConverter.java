@@ -6,6 +6,8 @@
  */
 package org.sonatype.nexus.repository.huggingface.rest;
 
+import org.sonatype.nexus.content.huggingface.internal.recipe.HuggingFaceXetFacet;
+import org.sonatype.nexus.repository.config.Configuration;
 import org.sonatype.nexus.repository.rest.api.ProxyRepositoryApiRequestToConfigurationConverter;
 import org.sonatype.nexus.repository.routing.RoutingRuleStore;
 
@@ -19,5 +21,13 @@ public class HuggingFaceProxyRepositoryApiRequestToConfigurationConverter
   @Autowired
   public HuggingFaceProxyRepositoryApiRequestToConfigurationConverter(final RoutingRuleStore routingRuleStore) {
     super(routingRuleStore);
+  }
+
+  @Override
+  public Configuration convert(final HuggingFaceProxyRepositoryApiRequest request) {
+    Configuration configuration = super.convert(request);
+    boolean xet = request.getXet() != null && Boolean.TRUE.equals(request.getXet().getEnabled());
+    configuration.attributes(HuggingFaceXetFacet.CONFIG_KEY).set("enabled", xet);
+    return configuration;
   }
 }

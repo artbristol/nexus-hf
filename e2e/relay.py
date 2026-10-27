@@ -11,7 +11,8 @@ its manners and its evidence:
 * every request is recorded, so tests can assert e.g. that a file was fetched from the CDN once;
 * faults can be injected into chosen responses (corrupt or truncated bodies, stalls, errors).
 
-Redirects to the CDN and pagination links are rewritten to go through the relay as well.
+Redirects to the CDN, pagination links, and the XET storage URLs (in token responses and file
+reconstructions) are rewritten to go through the relay as well.
 """
 
 import http.client
@@ -62,6 +63,12 @@ class Request:
     path: str        # path and query on the Hub, or of the CDN URL
     cdn: bool
     status: int = 0
+
+
+def _carries_xet_urls(request: Request, response) -> bool:
+    """XET token responses and file reconstructions, whose JSON holds the URLs of XET storage."""
+    json = (response.getheader("Content-Type") or "").startswith("application/json")
+    return json and response.status == 200 and (request.cdn or "/xet-read-token/" in request.path)
 
 
 class Relay:
@@ -147,7 +154,7 @@ class Relay:
                 self.failure = "byte budget of %d exceeded" % self.max_bytes
 
     def _rewrite(self, value: str) -> str:
-        """Points Hub and CDN URLs in Location and Link headers at the relay."""
+        """Points Hub and CDN URLs in headers and XET JSON at the relay."""
         def one(url):
             if url.startswith(UPSTREAM + "/"):
                 return self.base_url + url[len(UPSTREAM) + 1:]
@@ -195,6 +202,9 @@ class Relay:
                 headers = {k: v for k, v in self.headers.items()
                            if k.lower() not in HOP_BY_HOP and k.lower() not in ("host", "content-length")}
                 headers["User-Agent"] = (headers.get("User-Agent", "") + " " + USER_AGENT).strip()
+                if cdn or "/xet-read-token/" in request.path:
+                    # XET JSON is rewritten, so it must arrive uncompressed
+                    headers = {k: v for k, v in headers.items() if k.lower() != "accept-encoding"}
                 connection = http.client.HTTPSConnection(parsed.hostname, parsed.port or 443, timeout=60)
                 try:
                     connection.request(self.command, parsed.path + ("?" + parsed.query if parsed.query else ""),
@@ -205,6 +215,8 @@ class Relay:
                         relay.failure = "huggingface.co answered 429 (rate limited): stopping"
                     payload = response.read() if self.command != "HEAD" else b""
                     relay._count_bytes(len(payload))
+                    if _carries_xet_urls(request, response):
+                        payload = relay._rewrite(payload.decode()).encode()
                     self._respond(response, payload, fault)
                 except OSError as e:
                     request.status = 502
@@ -221,7 +233,7 @@ class Relay:
                     lower = name.lower()
                     if lower in HOP_BY_HOP or lower == "content-length" or lower in stripped:
                         continue
-                    if lower in ("location", "link"):
+                    if lower in ("location", "link", "x-xet-cas-url"):
                         value = relay._rewrite(value)
                     self.send_header(name, value)
                 length = int(response.getheader("Content-Length") or len(payload)) \

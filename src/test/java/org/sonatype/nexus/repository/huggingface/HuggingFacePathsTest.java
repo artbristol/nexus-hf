@@ -7,7 +7,10 @@
 package org.sonatype.nexus.repository.huggingface;
 
 import org.sonatype.nexus.repository.huggingface.HuggingFacePaths.FileRef;
+import org.sonatype.nexus.repository.huggingface.HuggingFacePaths.Reconstruction;
+import org.sonatype.nexus.repository.huggingface.HuggingFacePaths.RepoRef;
 import org.sonatype.nexus.repository.huggingface.HuggingFacePaths.RepoType;
+import org.sonatype.nexus.repository.huggingface.HuggingFacePaths.XorbRange;
 
 import org.junit.Test;
 
@@ -115,6 +118,8 @@ public class HuggingFacePathsTest
         HuggingFacePaths.encodeSlashedRevision("api/models/openai-community/gpt2/revision/refs/pr/1"));
     assertEquals("api/datasets/a/b/tree/refs%2Fconvert%2Fparquet/plain_text",
         HuggingFacePaths.encodeSlashedRevision("api/datasets/a/b/tree/refs/convert/parquet/plain_text"));
+    assertEquals("api/models/a/b/xet-read-token/refs%2Fpr%2F3",
+        HuggingFacePaths.encodeSlashedRevision("api/models/a/b/xet-read-token/refs/pr/3"));
     assertEquals("owner/name/resolve/main/refs/pr/1",
         HuggingFacePaths.encodeSlashedRevision("owner/name/resolve/main/refs/pr/1"));
   }
@@ -158,6 +163,54 @@ public class HuggingFacePathsTest
     assertTrue(HuggingFacePaths.isApi("/api/models/gpt2"));
     assertFalse(HuggingFacePaths.isApi("/api/models/openai-community/gpt2/xet-read-token/" + SHA));
     assertFalse(HuggingFacePaths.isApi("/api/whoami-v2"));
+  }
+
+  /**
+   * The token URLs {@code huggingface_hub} builds ({@code xet_connection_info_refresh_url}) and the Hub links to.
+   */
+  @Test
+  public void xetTokenPaths() {
+    assertEquals(new RepoRef(RepoType.MODEL, "hf-internal-testing/tiny-random-gpt2", SHA),
+        HuggingFacePaths.parseXetToken("/api/models/hf-internal-testing/tiny-random-gpt2/xet-read-token/" + SHA)
+            .orElseThrow());
+    assertEquals(new RepoRef(RepoType.DATASET, "a/b", "refs/convert/parquet"),
+        HuggingFacePaths.parseXetToken("/api/datasets/a/b/xet-read-token/refs/convert/parquet").orElseThrow());
+    assertEquals(new RepoRef(RepoType.KERNEL, "gpt2", "main"),
+        HuggingFacePaths.parseXetToken("/api/kernels/gpt2/xet-read-token/main").orElseThrow());
+    RepoRef space = HuggingFacePaths.parseXetToken("/api/spaces/a/b/xet-read-token/main").orElseThrow();
+    assertEquals("/api/spaces/a/b/xet-read-token/main", space.xetTokenPath());
+
+    assertFalse(HuggingFacePaths.parseXetToken("/api/models/a/b/xet-write-token/main").isPresent());
+    assertFalse(HuggingFacePaths.parseXetToken("/api/buckets/a/b/xet-read-token/main").isPresent());
+    assertFalse(HuggingFacePaths.parseXetToken("/api/models/a/b/c/xet-read-token/main").isPresent());
+  }
+
+  /**
+   * As {@code hf_xet} appends them to the storage URL: {@code {casUrl}/v{1|2}/reconstructions/{hash}}, and the xorb
+   * URLs of the reconstructions.
+   */
+  @Test
+  public void xetStoragePaths() {
+    String hash = "f8accece953fd366d4ce30597b97acc1ccedc3c785187a5ef6ecb4a8e1755122";
+    assertEquals(new Reconstruction(2, hash),
+        HuggingFacePaths.parseXetReconstruction("/.xet/v2/reconstructions/" + hash).orElseThrow());
+    assertEquals(new Reconstruction(1, hash),
+        HuggingFacePaths.parseXetReconstruction("/.xet/v1/reconstructions/" + hash).orElseThrow());
+    assertFalse(HuggingFacePaths.parseXetReconstruction("/.xet/v3/reconstructions/" + hash).isPresent());
+    assertFalse(HuggingFacePaths.parseXetReconstruction("/.xet/v2/reconstructions/" + hash.toUpperCase()).isPresent());
+    assertFalse(HuggingFacePaths.parseXetReconstruction("/.xet/v2/reconstructions").isPresent());
+
+    XorbRange range = HuggingFacePaths.parseXetXorb("/.xet/xorbs/" + hash + "/486722-904005").orElseThrow();
+    assertEquals(new XorbRange(hash, 486722, 904005), range);
+    assertEquals(417284, range.length());
+    assertEquals("/.xet/xorbs/" + hash + "/486722-904005", range.path());
+    assertFalse(HuggingFacePaths.parseXetXorb("/.xet/xorbs/" + hash + "/904005-486722").isPresent());
+    assertFalse(HuggingFacePaths.parseXetXorb("/.xet/xorbs/" + hash + "/-1-5").isPresent());
+    assertFalse(HuggingFacePaths.parseXetXorb("/.xet/xorbs/" + hash).isPresent());
+
+    // nothing else answers there
+    assertFalse(HuggingFacePaths.parseFile("/.xet/xorbs/" + hash + "/486722-904005").isPresent());
+    assertFalse(HuggingFacePaths.isApi("/.xet/v2/reconstructions/" + hash));
   }
 
   @Test

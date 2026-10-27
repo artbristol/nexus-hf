@@ -20,9 +20,15 @@ import static java.util.Objects.requireNonNull;
  * @param etag   git blob id, or SHA-256 for LFS files ({@code X-Linked-Etag} or {@code ETag}), unquoted
  * @param size   file size in bytes ({@code X-Linked-Size} or {@code Content-Length}), if known
  * @param repoId canonical repository id, if the Hub redirected to it (renamed repository, other spelling)
+ * @param xetHash XET file hash, for files in XET storage ({@code X-Xet-Hash})
  */
 @JsonIgnoreProperties(ignoreUnknown = true)
-public record HuggingFaceFileInfo(String commit, @Nullable String etag, @Nullable Long size, @Nullable String repoId)
+public record HuggingFaceFileInfo(
+    String commit,
+    @Nullable String etag,
+    @Nullable Long size,
+    @Nullable String repoId,
+    @Nullable String xetHash)
 {
   public static final String X_REPO_COMMIT = "X-Repo-Commit";
 
@@ -30,17 +36,16 @@ public record HuggingFaceFileInfo(String commit, @Nullable String etag, @Nullabl
 
   public static final String X_LINKED_SIZE = "X-Linked-Size";
 
+  public static final String X_XET_HASH = "X-Xet-Hash";
+
   public HuggingFaceFileInfo {
     requireNonNull(commit);
   }
 
   public HuggingFaceFileInfo(final String commit, @Nullable final String etag, @Nullable final Long size) {
-    this(commit, etag, size, null);
+    this(commit, etag, size, null, null);
   }
 
-  /**
-   * Whether the etag is the SHA-256 of the content, which is the case for LFS files.
-   */
   /**
    * Whether the etag identifies the content: SHA-256 for LFS files, git blob id otherwise (a hash over size and
    * content, so the size must be known).

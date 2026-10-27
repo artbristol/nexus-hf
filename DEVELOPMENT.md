@@ -14,9 +14,10 @@ mvn package        # compiles, runs the unit tests, builds the jar
 ```
 
 The unit tests cover what can be checked without a Hub: path parsing, error encoding, the
-streaming download (verification, resuming, concurrent readers) and content type validation
-against Nexus' real MIME detection. Everything else is covered by the [end-to-end
-tests](#end-to-end-tests).
+streaming download (verification, resuming, concurrent readers), content type validation
+against Nexus' real MIME detection, and the XET pieces (tokens, xorb ranges, `multipart/byteranges`,
+slicing reconstructions) against real XET storage data from the Hub (`src/test/resources`).
+Everything else is covered by the [end-to-end tests](#end-to-end-tests).
 
 * The parent POM is Nexus' `nexus-common-components-formats-parent`, resolved from Maven Central
   (`<relativePath/>`); no nexus-public checkout is needed. It enforces JDK 25 for the build and
@@ -55,6 +56,7 @@ plugin.
 | `GET  /api/{type}s/{repo}/tree/{rev}[/{path}]` | file listing, paginated with `Link: <...>; rel="next"` |
 | `GET  /api/{type}s?search=...` | listings and searches |
 | `GET  /api/{organizations,users}/{name}/overview` | publishers (checked by the `kernels` package) |
+| `GET  /api/{type}s/{repo}/xet-read-token/{rev}` | XET token and storage URL, see [XET](#xet) |
 
 `{repo}` is `name` or `owner/name`; `{type}` is `model`, `dataset`, `space` or `kernel`. File URLs of
 datasets, spaces and kernels are prefixed with `datasets/`, `spaces/` and `kernels/`.
@@ -65,7 +67,8 @@ otherwise be readable by anyone who can read the repository. See `HuggingFacePat
 
 ### Files
 
-Upstream answers `resolve` with a 302 to a CDN (LFS/XET files) or a 307 to a relative
+Upstream answers `resolve` with a 302 to a CDN (LFS/XET files, downloadable over plain HTTP too)
+or a 307 to a relative
 `/api/resolve-cache/...` URL (small files). Nexus' HTTP client follows redirects, which loses
 the Hub headers, so a file request is served in two steps:
 
@@ -118,12 +121,67 @@ When a branch or tag resolves to a commit, the file metadata is also stored for 
 `/api/...` GETs are proxied and cached as metadata (query string included in the cache key).
 Two rewrites keep clients on the proxy:
 
-* `xetHash` fields are removed from JSON. Otherwise `snapshot_download` skips the `HEAD` and
-  fetches straight from XET storage.
+* `xetHash` fields are removed from the JSON served, unless XET is offered to the client (they are
+  stored). Otherwise `snapshot_download` skips the `HEAD` and asks for an XET token.
 * Paginated listings (`Link: <...>; rel="next"`) are proxied page by page: each page is cached
   with its next-page link, which is served pointing at this repository (`HuggingFaceHeadersHandler`).
 
-`xet-read-token` endpoints are not proxied (404). API responses are served as `application/json`.
+`xet-read-token` is answered by the repository itself, see [XET](#xet); `xet-write-token` is not
+proxied (404). API responses are served as `application/json`.
+
+### XET
+
+XET (checked against `hf_xet` 1.7.0 and the [protocol spec](https://huggingface.co/docs/xet/index))
+stores files as chunks, packed into xorbs of up to 64 MB. A client with `hf_xet`:
+
+1. learns a file's XET hash from `X-Xet-Hash` (on the `HEAD`, or `xetHash` in a listing), and gets
+   a token and the storage (CAS) URL from `xet-read-token`, in `X-Xet-*` headers;
+2. asks the storage for the file's *reconstruction* (`GET {cas}/v2/reconstructions/{hash}`, with
+   `Authorization: Bearer <token>` and a `Range` for a window of the file): terms (chunk ranges of
+   xorbs, in file order), and presigned URLs for the byte ranges of the xorbs they need;
+3. fetches those byte ranges, with no credentials, and decompresses the chunks.
+
+The repository stands in for the storage (`HuggingFaceXetFacet`), under `/.xet/`:
+
+* `xet-read-token` gets a Hub token for that repository and revision (cached until it expires,
+  with the repository's bearer token if it has one), and answers with a token of this Nexus
+  (`HuggingFaceXetTokens`: HMAC-signed, valid for an hour, naming the Nexus repository, the Hub
+  repository and revision, and the user) and `{repository}/.xet` as storage URL. The Hub's own
+  `xet-auth` link is passed on as is: `huggingface_hub` rewrites `https://huggingface.co` to its
+  endpoint, keeping credentials in it.
+* Reconstructions are fetched for the whole file (v2, else v1, as clients do), stored at
+  `/.xet/reconstructions/<hash>.json` without URLs, and every window is answered by slicing that:
+  whole terms from the one holding the first byte (with `offset_into_first_range`) to the one
+  holding the last, which the client trims. The client sizes windows by its download speed; slicing
+  keeps the xorb ranges, and so the cache, the same whatever the windows. A window past the end is
+  answered 416, which is how the client learns it has everything. The whole reconstruction is fetched
+  again when a window needs a range that is neither cached nor has a presigned URL still valid.
+* In the answer, every xorb range gets its own URL, `/.xet/xorbs/<xorb>/<first>-<last>?token=...`,
+  which the client fetches with a single range. The presigned URLs are remembered (50 minutes; the
+  Hub's are valid for an hour) by range. A range is served from the cache, or fetched with its
+  presigned URL: with exactly the ranges it was signed for (several give `multipart/byteranges`),
+  each checked (`XorbChunks`: the expected number of chunks, exactly filling it, with valid headers)
+  and stored before it is served. Concurrent requests share one upstream request. An unknown range,
+  or a presigned URL refused upstream, is answered 403, which makes the client fetch the
+  reconstruction again.
+
+Chunk data cannot be verified: xorb ranges carry no hashes, and a whole file's XET hash is a Merkle
+hash over all its chunks, decompressed. The structural check catches truncated, padded and foreign
+content.
+
+**Authentication.** `hf_xet` sends `Authorization: Bearer <XET token>` to the storage (replacing
+any Basic credentials in the URL) and nothing to the xorb URLs, so Basic authentication cannot reach
+it. `HuggingFaceXetTokenRealm` authenticates these requests with the tokens of this Nexus, as the user
+they were issued to, who keeps their permissions; `HuggingFaceXetTokenExtractor` takes them from the
+bearer header or the `token` parameter, only for `/.xet/` requests of the repository they name, and
+only while the realm is active. XET is therefore offered (headers, `xetHash`, token endpoint) only
+when the repository has `xet.enabled`, the realm is active and the user is not anonymous. The signing
+key lives as long as the Nexus process: clients that were mid-download during a restart fail and
+must be retried.
+
+The repository forms of nexus-public already have the *Enable XET* setting (`xet.enabled`), hidden
+unless the UI state has `nexus.format.huggingface.xet.enabled`, which `HuggingFaceXetStateContributor`
+sets.
 
 ### Errors
 
@@ -156,11 +214,12 @@ responses and file metadata, typed as JSON.
 
 One component per repo revision: namespace = owner (empty for legacy un-namespaced repos),
 name = repo name, version = commit hash, kind = `model` / `dataset` / `space`. Each file is an
-asset of that component. Metadata and API responses are component-less assets.
+asset of that component. Metadata, API responses and XET storage data (`/.xet/`) are component-less
+assets.
 
 ## Not supported (yet)
 
-* XET transfer protocol.
+* XET for anonymous clients, which cannot be told apart in XET storage requests; XET uploads.
 * Gated/private models with a token: bearer-token auth is wired up but untested. Without a
   token they fail with the proper `GatedRepo` error.
 * Hosted and group repositories; uploads.
@@ -205,10 +264,17 @@ nested directories) and spaces verified file by file against the Hub's hashes; a
 the Hub's without downloading; the Hub's own error types for missing repos, files and revisions
 and gated repos, also from the negative cache and without auto-blocking; conditional and range
 requests; paginated listings; storage shared between branch and commit; components; `HfFileSystem`;
-clients authenticating with credentials in the endpoint URL; and that nothing ever uses XET; files
+clients authenticating with credentials in the endpoint URL; and that without XET enabled nothing uses it; files
 unchanged between commits not downloaded again; mislabelled files cached; other spellings stored
 under the canonical name; kernel repositories, listings and publisher overviews; and identity
 endpoints not proxied.
+
+`test_xet.py` checks XET, as a user who may only read the test repository: files downloaded with
+`hf_xet` match the Hub's hashes and come from the repository's XET storage, and again from the cache
+without any request to the Hub; also without anonymous access; XET offered only to users, only with
+the realm active and only if enabled; storage requests refused without the repository's token, and
+the end of a file signalled with 416; a dropped xorb transfer and a refused presigned URL retried.
+The relay rewrites the storage URLs of token responses and reconstructions to go through it.
 
 `test_faults.py` checks failure handling: dropped and stalled transfers resumed transparently;
 corrupt content never served complete nor cached; slow downloads streamed to concurrent clients

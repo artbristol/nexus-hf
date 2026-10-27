@@ -11,7 +11,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 public class HuggingFaceProxyFacetTest
 {
@@ -22,10 +24,11 @@ public class HuggingFaceProxyFacetTest
     JsonNode node = objectMapper.readTree("""
         [{"type":"file","path":"model.safetensors","xetHash":"abc","lfs":{"oid":"x","xetHash":"def"}},
          {"type":"directory","path":"onnx"}]""");
-    HuggingFaceProxyFacet.stripXetHashes(node);
+    assertTrue(HuggingFaceProxyFacet.stripXetHashes(node));
     assertEquals(objectMapper.readTree("""
         [{"type":"file","path":"model.safetensors","lfs":{"oid":"x"}},
          {"type":"directory","path":"onnx"}]"""), node);
+    assertFalse(HuggingFaceProxyFacet.stripXetHashes(node));
   }
 
   @Test

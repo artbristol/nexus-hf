@@ -38,6 +38,8 @@ import static org.sonatype.nexus.repository.view.ContentTypes.APPLICATION_OCTET_
  *
  * Hub API responses live under {@code /api/}, at paths whose last segment is a revision or directory name rather than
  * a file name (e.g. {@code /api/models/owner/name/revision/main}); they are validated and typed as JSON.
+ *
+ * XET xorb ranges ({@code /.xet/xorbs/...}) are compressed pieces of repository files, accepted like those.
  */
 @Component
 @Qualifier(HuggingFaceFormat.NAME)
@@ -49,6 +51,8 @@ public class HuggingFaceContentValidator
   private static final String API_PREFIX = "/api/";
 
   private static final String META_PREFIX = "/.meta/";
+
+  private static final String XORB_PREFIX = "/.xet/xorbs/";
 
   private final DefaultContentValidator defaultContentValidator;
 
@@ -78,7 +82,8 @@ public class HuggingFaceContentValidator
       int query = name.indexOf('?');
       name = (query < 0 ? name : name.substring(0, query)) + ".json";
     }
-    boolean strict = strictContentTypeValidation && !isRepositoryFile(name) && !isOpaque(contentSupplier, name);
+    boolean strict = strictContentTypeValidation && !isRepositoryFile(name) && !isXorbRange(name)
+        && !isOpaque(contentSupplier, name);
     return defaultContentValidator.determineContentType(
         strict, contentSupplier, mimeRulesSource, name, declaredContentType);
   }
@@ -91,6 +96,13 @@ public class HuggingFaceContentValidator
    */
   private static boolean isRepositoryFile(@Nullable final String name) {
     return name != null && !name.startsWith(API_PREFIX) && !name.startsWith(META_PREFIX) && name.contains("/resolve/");
+  }
+
+  /**
+   * XET storage data: compressed chunks of repository files, checked for their structure before they are stored.
+   */
+  private static boolean isXorbRange(@Nullable final String name) {
+    return name != null && name.startsWith(XORB_PREFIX);
   }
 
   private boolean isOpaque(final InputStreamSupplier contentSupplier, @Nullable final String contentName)

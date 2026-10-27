@@ -153,6 +153,18 @@ public class HuggingFaceContentFacetImpl
   }
 
   @Override
+  public Content putXetData(final String path, final Path file, final String contentType) throws IOException {
+    try (TempBlob blob = blobs().ingest(file, contentType, HASHING, false)) {
+      return assets()
+          .path(path)
+          .kind(XET_KIND)
+          .blob(blob)
+          .save()
+          .download();
+    }
+  }
+
+  @Override
   public Content putMetadata(final String path, final String kind, final Payload content) throws IOException {
     try (TempBlob blob = blobs().ingest(content, HASHING)) {
       return assets()

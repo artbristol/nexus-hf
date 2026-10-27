@@ -27,13 +27,15 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 /**
  * Request to create or update a Hugging Face proxy repository.
  *
- * The repository form of the UI also sends an {@code xet} section; XET is not supported, so it is ignored.
+ * Its {@code xet} section, which the repository forms of the UI send too, turns XET on or off; without one, XET is off.
  */
 @JsonFilter(EditionVisibility.NAME)
-@JsonIgnoreProperties({"format", "type", "xet"})
+@JsonIgnoreProperties({"format", "type"})
 public class HuggingFaceProxyRepositoryApiRequest
     extends ProxyRepositoryApiRequest
 {
+  private final HuggingFaceXetAttributes xet;
+
   @JsonCreator(mode = JsonCreator.Mode.PROPERTIES)
   @SuppressWarnings("squid:S00107") // suppress constructor parameter count
   public HuggingFaceProxyRepositoryApiRequest(
@@ -46,9 +48,15 @@ public class HuggingFaceProxyRepositoryApiRequest
       @JsonProperty("httpClient") final HttpClientAttributes httpClient,
       @JsonProperty("routingRuleName") @JsonAlias("routingRule") final String routingRule,
       @JsonProperty("replication") @JsonInclude(value = Include.NON_EMPTY,
-          content = Include.NON_NULL) final ReplicationAttributes replication)
+          content = Include.NON_NULL) final ReplicationAttributes replication,
+      @JsonProperty("xet") final HuggingFaceXetAttributes xet)
   {
     super(name, HuggingFaceFormat.NAME, online, storage, cleanup, proxy, negativeCache, httpClient, routingRule,
         replication);
+    this.xet = xet;
+  }
+
+  public HuggingFaceXetAttributes getXet() {
+    return xet;
   }
 }

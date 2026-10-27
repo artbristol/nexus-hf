@@ -76,6 +76,8 @@ public class HuggingFaceProxyRecipe
 
   private final Provider<HuggingFaceProxyFacet> proxyFacet;
 
+  private final Provider<HuggingFaceXetFacet> xetFacet;
+
   private final Provider<LastAssetMaintenanceFacet> maintenanceFacet;
 
   private final Provider<SearchFacet> searchFacet;
@@ -110,6 +112,8 @@ public class HuggingFaceProxyRecipe
 
   private final ProxyHandler proxyHandler;
 
+  private final HuggingFaceXetHandler xetHandler;
+
   @Autowired
   @SuppressWarnings("squid:S00107") // suppress constructor parameter count
   public HuggingFaceProxyRecipe(
@@ -121,6 +125,7 @@ public class HuggingFaceProxyRecipe
       final Provider<HttpClientFacet> httpClientFacet,
       final Provider<NegativeCacheFacet> negativeCacheFacet,
       final Provider<HuggingFaceProxyFacet> proxyFacet,
+      final Provider<HuggingFaceXetFacet> xetFacet,
       final Provider<LastAssetMaintenanceFacet> maintenanceFacet,
       final Provider<SearchFacet> searchFacet,
       final Provider<BrowseFacet> browseFacet,
@@ -137,7 +142,8 @@ public class HuggingFaceProxyRecipe
       final HuggingFaceHeadersHandler huggingFaceHeadersHandler,
       final HuggingFaceErrorHandler huggingFaceErrorHandler,
       final LastDownloadedHandler lastDownloadedHandler,
-      final ProxyHandler proxyHandler)
+      final ProxyHandler proxyHandler,
+      final HuggingFaceXetHandler xetHandler)
   {
     super(type, format);
     this.securityFacet = requireNonNull(securityFacet);
@@ -146,6 +152,7 @@ public class HuggingFaceProxyRecipe
     this.httpClientFacet = requireNonNull(httpClientFacet);
     this.negativeCacheFacet = requireNonNull(negativeCacheFacet);
     this.proxyFacet = requireNonNull(proxyFacet);
+    this.xetFacet = requireNonNull(xetFacet);
     this.maintenanceFacet = requireNonNull(maintenanceFacet);
     this.searchFacet = requireNonNull(searchFacet);
     this.browseFacet = requireNonNull(browseFacet);
@@ -163,6 +170,7 @@ public class HuggingFaceProxyRecipe
     this.huggingFaceErrorHandler = requireNonNull(huggingFaceErrorHandler);
     this.lastDownloadedHandler = requireNonNull(lastDownloadedHandler);
     this.proxyHandler = requireNonNull(proxyHandler);
+    this.xetHandler = requireNonNull(xetHandler);
   }
 
   @Override
@@ -173,6 +181,7 @@ public class HuggingFaceProxyRecipe
     repository.attach(httpClientFacet.get());
     repository.attach(negativeCacheFacet.get());
     repository.attach(proxyFacet.get());
+    repository.attach(xetFacet.get());
     repository.attach(maintenanceFacet.get());
     repository.attach(searchFacet.get());
     repository.attach(browseFacet.get());
@@ -185,9 +194,30 @@ public class HuggingFaceProxyRecipe
         new ActionMatcher(HttpMethods.GET, HttpMethods.HEAD), new RegexMatcher(HuggingFacePaths.FILE_REGEX))));
     builder.route(proxyRoute(and(
         new ActionMatcher(HttpMethods.GET), new RegexMatcher(HuggingFacePaths.API_REGEX))));
+    for (String xetPath : new String[]{
+        HuggingFacePaths.XET_TOKEN_REGEX, HuggingFacePaths.XET_RECONSTRUCTION_REGEX, HuggingFacePaths.XET_XORB_REGEX}) {
+      builder.route(xetRoute(and(new ActionMatcher(HttpMethods.GET), new RegexMatcher(xetPath))));
+    }
     builder.defaultHandlers(notFound());
     facet.configure(builder.create());
     return facet;
+  }
+
+  /**
+   * XET endpoints, answered by {@link HuggingFaceXetFacet}. Xorb ranges are answered whole: the client asks for each
+   * with the range it was given, which is all of it.
+   */
+  private Route xetRoute(final Matcher matcher) {
+    return new Route.Builder()
+        .matcher(matcher)
+        .handler(timingHandler)
+        .handler(securityHandler)
+        .handler(exceptionHandler)
+        .handler(handlerContributor)
+        .handler(huggingFaceErrorHandler)
+        .handler(lastDownloadedHandler)
+        .handler(xetHandler)
+        .create();
   }
 
   private Route proxyRoute(final Matcher matcher) {

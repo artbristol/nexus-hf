@@ -29,20 +29,24 @@ class Nexus:
         except urllib.error.HTTPError as e:
             raise AssertionError("%s %s -> %d %s" % (method, path, e.code, e.read()[:300])) from None
 
-    def create_proxy(self, name, remote_url, metadata_max_age=1440, auto_block=False, timeout=None, blocked=False):
+    def create_proxy(self, name, remote_url, metadata_max_age=1440, auto_block=False, timeout=None, blocked=False,
+                     xet=False):
         http_client = {"blocked": blocked, "autoBlock": auto_block}
         if timeout is not None:
             # retries: 0 so that a failure costs the Hub one request, not several
             http_client["connection"] = {"timeout": timeout, "retries": 0}
         self.call("POST", "/service/rest/v1/repositories/huggingface/proxy", self._proxy_body(
-            name, remote_url, metadata_max_age, http_client))
+            name, remote_url, metadata_max_age, http_client, xet))
 
-    def update_proxy(self, name, remote_url, metadata_max_age=1440, auto_block=False, blocked=False):
+    def update_proxy(self, name, remote_url, metadata_max_age=1440, auto_block=False, blocked=False, xet=False):
         self.call("PUT", "/service/rest/v1/repositories/huggingface/proxy/" + name, self._proxy_body(
-            name, remote_url, metadata_max_age, {"blocked": blocked, "autoBlock": auto_block}))
+            name, remote_url, metadata_max_age, {"blocked": blocked, "autoBlock": auto_block}, xet))
+
+    def proxy(self, name):
+        return self.call("GET", "/service/rest/v1/repositories/huggingface/proxy/" + name)
 
     @staticmethod
-    def _proxy_body(name, remote_url, metadata_max_age, http_client):
+    def _proxy_body(name, remote_url, metadata_max_age, http_client, xet):
         return {
             "name": name,
             "online": True,
@@ -50,6 +54,7 @@ class Nexus:
             "proxy": {"remoteUrl": remote_url, "contentMaxAge": 1440, "metadataMaxAge": metadata_max_age},
             "negativeCache": {"enabled": True, "timeToLive": 1440},
             "httpClient": http_client,
+            "xet": {"enabled": xet},
         }
 
     def delete_repository(self, name):
@@ -75,3 +80,24 @@ class Nexus:
 
     def is_anonymous_access_enabled(self):
         return self.call("GET", "/service/rest/v1/security/anonymous")["enabled"]
+
+    def active_realms(self):
+        return self.call("GET", "/service/rest/v1/security/realms/active")
+
+    def set_active_realms(self, realms):
+        self.call("PUT", "/service/rest/v1/security/realms/active", realms)
+
+    def create_reader(self, user, password, repository):
+        """A user who may only read (and browse) one Hugging Face repository."""
+        role = user + "-role"
+        self.call("POST", "/service/rest/v1/security/roles", {
+            "id": role, "name": role, "description": "e2e", "roles": [],
+            "privileges": ["nx-repository-view-huggingface-%s-%s" % (repository, action)
+                           for action in ("read", "browse")]})
+        self.call("POST", "/service/rest/v1/security/users", {
+            "userId": user, "firstName": "e2e", "lastName": "e2e", "emailAddress": user + "@example.com",
+            "password": password, "status": "active", "roles": [role]})
+
+    def delete_reader(self, user):
+        self.call("DELETE", "/service/rest/v1/security/users/" + user)
+        self.call("DELETE", "/service/rest/v1/security/roles/" + user + "-role")

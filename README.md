@@ -57,6 +57,29 @@ The jar is `target/nexus-repository-huggingface-<version>.jar`.
    authentication of type bearer token. Everything that token can read becomes readable by anyone
    who can read the Nexus repository; restrict access to the repository accordingly.
 
+5. Optionally, enable XET (see below).
+
+### XET
+
+Hugging Face stores large files with its XET protocol. Clients that have `hf_xet` installed (the
+default for `huggingface_hub`) can download them with it, through Nexus, which caches the pieces of
+XET storage they fetch. Without XET, these files are downloaded over plain HTTP, also through
+Nexus.
+
+To enable it:
+
+1. Activate the *Hugging Face XET Token Realm*: *Settings → Security → Realms*. XET clients
+   authenticate their storage requests with short-lived tokens that Nexus issues to them, as the
+   Nexus user they asked as, not with a password.
+2. Enable XET for the repository: *Enable XET* in the repository form, or `"xet": {"enabled": true}`
+   in the REST API request above. It is off unless enabled.
+
+XET is offered only to authenticated users (credentials in the endpoint URL, see below); anonymous
+clients download over HTTP. The tokens appear in the URLs of XET storage requests, so in Nexus'
+request log; they expire after an hour and are valid only for XET storage requests to that one
+repository. Setting `nexus.format.huggingface.xet.enabled=false` in `etc/nexus.properties` turns XET
+off for all repositories.
+
 ## Using
 
 Point clients at the repository:
@@ -85,7 +108,7 @@ with the default client settings.
 ## Limitations
 
 * Proxy repositories only: no hosted or group repositories, no uploads.
-* Downloads always use plain HTTP; Hugging Face's XET protocol is not supported.
+* XET downloads need an authenticated user and the XET token realm; other clients use plain HTTP.
 * Access to gated or private models with a token has not been tested yet.
 
 ## License
