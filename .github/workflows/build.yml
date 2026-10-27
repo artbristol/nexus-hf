@@ -9,6 +9,11 @@ on:
 permissions:
   contents: read
 
+# one run at a time talks to huggingface.co
+concurrency:
+  group: e2e
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,8 +26,25 @@ jobs:
           java-version: '25'
           cache: maven
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # unit tests, then the e2e suite against a Nexus with the plugin and the real Hub
       - name: Build and test
-        run: mvn -B package
+        env:
+          # optional: enables the gated-repository test
+          E2E_HF_TOKEN: ${{ secrets.E2E_HF_TOKEN }}
+        run: mvn -B verify
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-logs
+          path: |
+            target/e2e/nexus.out
+            target/e2e/sonatype-work/nexus3/log/
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
         with:

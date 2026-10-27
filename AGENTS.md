@@ -28,8 +28,8 @@ unmodified Nexus. See README.md (users) and DEVELOPMENT.md (design, tests, relea
 - Unit tests must check behaviour against something independent: real MIME detection, real path
   shapes, failure timing. Don't write tests that just mirror the implementation.
 - When you find a bug, add a test for it, in e2e if it needs Nexus or the Hub.
-- `mvn package` runs the unit tests. For e2e, see DEVELOPMENT.md (needs a Nexus with the plugin
-  installed).
+- `mvn package` runs the unit tests; `mvn verify` also runs the e2e suite, against a Nexus it
+  assembles and starts itself (needs Python 3.13 and huggingface.co). CI runs `mvn verify`.
 
 ## Docs
 

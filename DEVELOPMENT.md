@@ -11,7 +11,11 @@ from the Hugging Face support in Sonatype's Community or Pro editions.
 
 ```sh
 mvn package        # compiles, runs the unit tests, builds the jar
+mvn verify         # also runs the end-to-end tests, against a Nexus with the jar and the real Hub
+mvn verify -DskipITs   # ... without them
 ```
+
+CI runs `mvn verify` on every push and pull request, one run at a time.
 
 The unit tests cover what can be checked without a Hub, against something independent where
 possible: Nexus' real MIME detection, real XET storage data from the Hub (`src/test/resources`), the
@@ -203,6 +207,14 @@ assets.
 `e2e/` holds a pytest suite that runs against a Nexus with the plugin installed and the real
 huggingface.co. It creates its own repositories (named `e2e-*`) and deletes them afterwards.
 
+`mvn verify` runs it in the integration-test phases (`e2e/lifecycle.py`): it assembles a Nexus
+Repository Core from Maven Central (the `nexus-base-overlay` zip, which is `bin/`, `etc/` and
+`deploy/`, plus the `nexus-repository-core` jar), starts it with the new jar on a free port with fresh
+data, builds a venv from the lockfile, runs the suite and stops Nexus. Everything is under
+`target/e2e`, including Nexus' log. Python 3.13 must be on the path (or `-De2e.python=...`).
+
+To run it against a Nexus of your own instead, e.g. while working on a test:
+
 ```sh
 cd e2e
 pip install -r requirements.txt
@@ -216,7 +228,7 @@ the suite was last run with, which are the ones these notes say the plugin was c
 move to newer clients, regenerate it as its header says, run the suite, and update those notes.
 `transformers` and `datasets` are optional; their tests are skipped without them. `E2E_HF_TOKEN`, a
 Hub token that can read `meta-llama/Llama-3.2-1B`, enables the test of a gated repository; it is
-skipped without one.
+skipped without one. In CI it comes from the repository secret of that name.
 
 Nexus does not talk to huggingface.co directly but through a relay started by the suite
 (`relay.py`), which forwards everything unchanged. Being the only way to the Hub, it keeps the

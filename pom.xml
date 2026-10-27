@@ -41,8 +41,134 @@
     </license>
   </licenses>
 
+  <properties>
+    <!--
+      The end-to-end suite (e2e/) runs in the integration-test phases, so `mvn verify` runs it and `mvn package` does
+      not; -DskipITs skips it. It runs against a Nexus assembled from Maven Central (see e2e/lifecycle.py) and the real
+      huggingface.co, and needs Python 3.13.
+    -->
+    <nexus.version>${project.parent.version}</nexus.version>
+    <e2e.home>${project.build.directory}/e2e/nexus-base-overlay-${nexus.version}</e2e.home>
+    <e2e.python>python3</e2e.python>
+    <skipITs>false</skipITs>
+  </properties>
+
   <build>
     <plugins>
+      <!-- a Nexus Repository Core installation: the overlay (bin/, etc/, deploy/) and the server jar in bin/ -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>e2e-nexus</id>
+            <phase>pre-integration-test</phase>
+            <goals>
+              <goal>unpack</goal>
+            </goals>
+            <configuration>
+              <skip>${skipITs}</skip>
+              <outputDirectory>${project.build.directory}/e2e</outputDirectory>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>org.sonatype.nexus.common.assemblies</groupId>
+                  <artifactId>nexus-base-overlay</artifactId>
+                  <version>${nexus.version}</version>
+                  <type>zip</type>
+                </artifactItem>
+              </artifactItems>
+            </configuration>
+          </execution>
+          <execution>
+            <id>e2e-nexus-jar</id>
+            <phase>pre-integration-test</phase>
+            <goals>
+              <goal>copy</goal>
+            </goals>
+            <configuration>
+              <skip>${skipITs}</skip>
+              <outputDirectory>${e2e.home}/bin</outputDirectory>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>org.sonatype.nexus.selfhosted.assemblies</groupId>
+                  <artifactId>nexus-repository-core</artifactId>
+                  <version>${nexus.version}</version>
+                </artifactItem>
+              </artifactItems>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <configuration>
+          <skip>${skipITs}</skip>
+          <executable>${e2e.python}</executable>
+          <workingDirectory>${project.basedir}</workingDirectory>
+        </configuration>
+        <executions>
+          <execution>
+            <id>e2e-start</id>
+            <phase>pre-integration-test</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <arguments>
+                <argument>e2e/lifecycle.py</argument>
+                <argument>start</argument>
+                <argument>--home=${e2e.home}</argument>
+                <argument>--plugin=${project.build.directory}/${project.build.finalName}.jar</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>e2e-test</id>
+            <phase>integration-test</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <arguments>
+                <argument>e2e/lifecycle.py</argument>
+                <argument>test</argument>
+                <argument>--home=${e2e.home}</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>e2e-stop</id>
+            <phase>post-integration-test</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <arguments>
+                <argument>e2e/lifecycle.py</argument>
+                <argument>stop</argument>
+                <argument>--home=${e2e.home}</argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>e2e-verify</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <arguments>
+                <argument>e2e/lifecycle.py</argument>
+                <argument>verify</argument>
+                <argument>--home=${e2e.home}</argument>
+              </arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+
       <!--
         The inherited githook-checks profile points core.hooksPath of the enclosing git repository at Nexus' own
         hooks; that is meant for the nexus-public tree only.
