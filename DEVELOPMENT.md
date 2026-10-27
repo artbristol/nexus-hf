@@ -22,16 +22,16 @@ possible: Nexus' real MIME detection, real XET storage data from the Hub (`src/t
 RFC for `multipart/byteranges`. Everything else is covered by the [end-to-end
 tests](#end-to-end-tests).
 
-* The parent POM is Nexus' `nexus-common-components-formats-parent`, resolved from Maven Central
-  (`<relativePath/>`); no nexus-public checkout is needed. It enforces JDK 25 for the build and
-  compiles for Java 21.
-* The parent's `githook-checks` profile would point `core.hooksPath` of the enclosing git
-  repository at Nexus' own hooks; its execution is bound to phase `none` in `pom.xml`.
+* The versions of the Nexus components, and of the libraries Nexus ships, come from Nexus'
+  `nexus-common-components-formats-parent`, imported as a BOM (from Maven Central; no nexus-public
+  checkout is needed). Nothing else is inherited from it: it brings Sonatype's own build (signing,
+  javadocs, git hooks, AspectJ weaving, which none of this code needs).
+* JDK 25 builds it, as it does Nexus; it compiles for Java 21.
 
 ## Targeting another Nexus version
 
 The plugin uses Nexus internals (proxy facet support, content store, view handlers), which change
-between releases. To build for another version, change the `<parent>` version in `pom.xml`, fix
+between releases. To build for another version, change `nexus.version` in `pom.xml`, fix
 whatever no longer compiles, test against that Nexus version, and add a row to the compatibility
 table in the README.
 
@@ -277,5 +277,4 @@ mvn -Pgithub-release deploy      # build, run all tests, release
 Releasing creates the tag `v<version>` at the commit built, and a GitHub release with the jar and
 `src/release/notes.md`; the tag is made from the version, so the two cannot disagree.
 `mvn -Pgithub-release initialize exec:exec@github-release` releases a jar already built in `target/`,
-and `-Drelease.gh=echo` shows the command instead of running it. (The profile is not called
-`release`: the Nexus parent POM has one of that name.)
+and `-Drelease.gh=echo` shows the command instead of running it.
