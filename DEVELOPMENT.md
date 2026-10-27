@@ -263,7 +263,16 @@ after 66 s.
 
 ## Releasing
 
-CI (`.github/workflows/build.yml`) builds and tests every push and pull request. To release,
-set `<version>` in `pom.xml`, update the compatibility table in the README, commit, and push a
-tag `v<version>`; the workflow checks that the tag matches the version and publishes a GitHub
-release with the jar.
+CI (`.github/workflows/build.yml`) only provisions a machine and runs Maven: everything it does
+runs the same from a laptop.
+
+To release: set `<version>` in `pom.xml`, update the compatibility table in the README, commit and
+push. Then either run the workflow (*Actions → build → Run workflow*), or run, at that commit:
+
+```sh
+JRELEASER_GITHUB_TOKEN=... mvn -Prelease deploy
+```
+
+Both build and run all tests, then create the tag `v<version>` and a GitHub release with the jar
+(JReleaser, configured in the `release` profile; notes in `src/release/notes.md`). The tag is made
+from the version, so the two cannot disagree. `-Djreleaser.dry.run=true` shows what would be done.
