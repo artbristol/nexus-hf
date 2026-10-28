@@ -1,7 +1,7 @@
 # Hugging Face proxy for Nexus Repository Core
 
 A plugin that adds a **Hugging Face proxy** repository type to the open-source
-[Sonatype Nexus Repository Core](https://github.com/sonatype/nexus-public), so that
+[Sonatype Nexus Repository Core](https://github.com/sonatype/nexus-public) (formerly OSS), so that
 `huggingface_hub`, `transformers` and anything else that honours `HF_ENDPOINT` can download
 models, datasets, spaces and kernels through Nexus, with caching.
 
@@ -33,7 +33,8 @@ The jar is `target/nexus-repository-huggingface-<version>.jar`.
 ## Installing
 
 1. Copy `nexus-repository-huggingface-<version>.jar` into the `deploy/` directory of your Nexus
-   installation.
+   installation (see [Getting Nexus Repository Core](#getting-nexus-repository-core) if you don't
+   have one).
 2. Start Nexus with the JVM option `-Dloader.path=deploy`:
 
    ```sh
@@ -109,6 +110,22 @@ with the default client settings.
 
 * Proxy repositories only: no hosted or group repositories, no uploads.
 * XET downloads need an authenticated user and the XET token realm; other clients use plain HTTP.
+
+## Getting Nexus Repository Core
+
+Sonatype's website doesn't offer a download of Nexus Repository Core, so assemble it from Maven
+Central:
+
+```sh
+V=3.97.2-02
+curl -LO https://repo1.maven.org/maven2/org/sonatype/nexus/common/assemblies/nexus-base-overlay/$V/nexus-base-overlay-$V.zip
+curl -LO https://repo1.maven.org/maven2/org/sonatype/nexus/selfhosted/assemblies/nexus-repository-core/$V/nexus-repository-core-$V.jar
+unzip nexus-base-overlay-$V.zip
+mv nexus-repository-core-$V.jar nexus-base-overlay-$V/bin/
+chmod +x nexus-base-overlay-$V/bin/nexus
+```
+
+The admin password is in `sonatype-work/nexus3/admin.password`.
 
 ## License
 
